@@ -52,3 +52,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# Local stage progress
+/PROGRESS.md
