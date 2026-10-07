@@ -137,12 +137,14 @@ name = "distengine"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "huggingface-hub" },
     { name = "torch" },
     { name = "transformers" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub", specifier = ">=1.33.0" },
     { name = "torch", specifier = ">=2.14.1" },
     { name = "transformers", specifier = ">=5.19.0" },
 ]

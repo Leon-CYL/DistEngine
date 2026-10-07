@@ -11,12 +11,42 @@ Status: complete.
 - Documented setup, editable installation, dependency management, and packaging.
 - Kept model loading and inference implementation for later stages.
 
+## Stage 1 — TinyLlama reference
+
+Status: core checkpoint complete; additional assignment examples remain.
+
+- Implemented `src/distengine/hf_reference.py` with prompt, output-length,
+  output-path, and revision arguments.
+- Loads `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, applies its chat template, and
+  generates greedily using Hugging Face `generate()` with KV caching enabled.
+- Resolves branch/tag revisions through Hugging Face Hub before loading; model
+  and tokenizer use the same immutable commit.
+- Saves input/output token IDs, formatted prompt, generation settings, revision,
+  and environment versions as JSON.
+
+Verified saved results on October 6, 2026:
+
+- Commit: `fe8a4ea1ffedaf415f4da2f062534de366a451e6`.
+- Environment: macOS, MPS, `torch.float32`, Python 3.11.9, PyTorch 2.14.1,
+  Transformers 5.19.0. The implementation uses eager attention.
+- Prompt: “What is the capital of France?” — 22 input tokens, 8 generated tokens
+  with a maximum of 32; response: “The capital of France is Paris.”
+- Saved files: `references/factual.json`, `references/factual_repeat.json`, and
+  the default-output copy `references/tinyllama_hf.json`.
+- Compared the factual and repeated runs: model commit, environment, formatted
+  prompt, generation settings, input token IDs, and generated token IDs all match.
+  This verification inspected existing saved results without rerunning inference.
+
+Remaining assignment work: capture the explanation and sentence-completion
+examples with the pinned revision, and write answers to the stage 1 learning
+questions. The README documents the model-running command.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
 | --- | --- | --- | --- |
 | 0 | Project setup | uv project, dependencies, package, README, PROGRESS, and .gitignore. | Complete |
-| 1 | TinyLlama reference | Load TinyLlama-1.1B with Hugging Face and generate reference text. | Pending |
+| 1 | TinyLlama reference | Load TinyLlama-1.1B with Hugging Face and generate reference text. | Core complete; assignment examples pending |
 | 2 | Understand TinyLlama | Document embeddings, layers, GQA, RoPE, attention, FFN, logits, and KV shapes. | Pending |
 | 3 | Request / sequence | Prompt tokens, generated tokens, status, and max output length. | Pending |
 | 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Pending |

@@ -24,6 +24,39 @@ TinyLlama reference for the next stages. No model weights are downloaded at stag
 Later GPU stages target Linux with NVIDIA GPUs; the setup command can run on macOS.
 Ray and Modal will be added when their stages are implemented.
 
+## Run the TinyLlama reference
+
+From the project root, run this command in your terminal:
+
+```sh
+uv run python -m distengine.hf_reference \
+  --prompt "What is the capital of France?" \
+  --max-new-tokens 32 \
+  --output references/factual.json \
+  --revision fe8a4ea1ffedaf415f4da2f062534de366a451e6
+```
+
+The module chooses CUDA, Apple MPS, or CPU automatically and uses float32 with
+eager attention. It formats the prompt with TinyLlama's chat template and runs
+greedy Hugging Face generation. The first run downloads the model files.
+It prints the resolved revision, prompt, token IDs, and decoded response, then
+saves a JSON reference with generation settings and environment metadata.
+`--max-new-tokens` is an upper limit; generation can end earlier at the EOS token.
+The command overwrites the output file if it already exists.
+
+For a repeated run, use the same command with
+`--output references/factual_repeat.json`. Keep the prompt, revision, output
+length, device, dtype, and library versions the same when comparing token IDs.
+
+You can also run `uv run python -m distengine.hf_reference` with defaults. Its
+default revision is `main`, which is resolved to a commit and saved under
+`resolved_revision` in `references/tinyllama_hf.json`. Use that commit with
+`--revision` for subsequent comparisons. View all options with:
+
+```sh
+uv run python -m distengine.hf_reference --help
+```
+
 ## How to make a package with uv
 
 For a **new** project, use:
@@ -57,11 +90,17 @@ DistEngine/
 ├── uv.lock
 ├── README.md
 ├── PROGRESS.md
+├── references/
+│   ├── factual.json
+│   ├── factual_repeat.json
+│   └── tinyllama_hf.json
 └── src/
     └── distengine/
         ├── __init__.py
-        └── __main__.py
+        ├── __main__.py
+        └── hf_reference.py
 ```
 
-Engine components will be added as their stages are reached. Stage 0 only provides
-the package scaffold, dependencies, and a small setup command.
+Stage 0 provides the package scaffold and setup command. Stage 1 adds a Hugging
+Face TinyLlama reference with saved token outputs. Engine components will be added
+as their stages are reached.
