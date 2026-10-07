@@ -1,0 +1,32 @@
+# Python and uv environments
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version.local
+
+# Build and tool output
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local secrets and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+
+# Downloaded models and generated benchmark output
+models/
+checkpoints/
+artifacts/
+results/
+*.log
+
+# Keep uv.lock tracked for reproducible dependency resolution.

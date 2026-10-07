@@ -1,0 +1,17 @@
+[project]
+name = "distengine"
+version = "0.1.0"
+description = "A minimal inference engine exploring disaggregated prefill and decode with work stealing."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.14.1",
+    "transformers>=5.19.0",
+]
+
+[project.scripts]
+distengine = "distengine:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
