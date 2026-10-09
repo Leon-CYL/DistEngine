@@ -23,7 +23,7 @@ htmlcov/
 .vscode/
 
 # Downloaded models and generated benchmark output
-models/
+/models/
 checkpoints/
 artifacts/
 results/

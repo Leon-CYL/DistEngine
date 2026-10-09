@@ -1,5 +1,6 @@
 import argparse
 import re
+from typing import Any, cast
 
 import torch
 import transformers
@@ -51,12 +52,18 @@ def main() -> None:
     print(f"Model revision: {resolved_revision}")
     print(f"Loading {MODEL_ID} on {device} with float32")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        dtype=torch.float32,
-        attn_implementation="eager",
-        revision=resolved_revision,
-    ).to(device)
+    # Transformers' auto-model annotations misdescribe .to() and .generate()
+    # in this version. Keep the typing workaround at the dynamic factory boundary.
+    model = cast(
+        Any,
+        AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            dtype=torch.float32,
+            attn_implementation="eager",
+            revision=resolved_revision,
+        ),
+    )
+    model.to(device)
     model.eval()
 
     # Use the same immutable commit for both model and tokenizer files.
@@ -132,7 +139,6 @@ def main() -> None:
     args.output.write_text(json.dumps(reference, indent=2) + "\n", encoding="utf-8")
     print(f"Saved reference to {args.output}")
     
-    # TODO: Run three prompts and compare a repeated run's generated token IDs.
 
 
 if __name__ == "__main__":

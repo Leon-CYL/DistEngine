@@ -41,16 +41,52 @@ Remaining assignment work: capture the explanation and sentence-completion
 examples with the pinned revision, and write answers to the stage 1 learning
 questions. The README documents the model-running command.
 
+## Stage 2 — Understand TinyLlama
+
+Status: complete.
+
+- Added [TinyLlama architecture notes](docs/tinyllama.md) covering embeddings,
+  decoder blocks, RMSNorm, GQA, RoPE, causal attention, SwiGLU, and logits.
+- Documented model dimensions, Q/K/V shapes, and planned per-layer KV-cache shapes.
+
+## Stage 4 — Model implementation
+
+Status: implementation complete; execution and correctness verification pending.
+
+- Implemented embeddings, LM head, linear projections, RMSNorm, SwiGLU, RoPE,
+  and full-sequence causal grouped-query attention in PyTorch.
+- Assembled 22 decoder blocks and the final normalization in `models/llama.py`.
+- Added pinned checkpoint loading with strict parameter-name and shape matching.
+- Fixed config typing and read the RoPE base from the installed Transformers
+  version's `rope_parameters` dictionary.
+- Scoped the downloaded-model ignore rule to `/models/`, keeping model source
+  files under `src/distengine/models/` available for tracking.
+
+The user-reported run on October 8, 2026 loaded HF weights but failed during
+custom model construction because `config.rope_theta` was unavailable. The
+config access has been fixed; a successful rerun has not yet been reported.
+
+## Stage 5 — Manual generation
+
+Status: implemented; successful execution and HF comparison pending.
+
+- Added greedy sampling and a manual generation loop without HF `generate()`.
+- Added `manual_generate.py` with prompt and maximum-output-length arguments.
+- Reuses the pinned tokenizer and chat template; currently supports one unpadded
+  request and recomputes the full sequence without a KV cache.
+- Documented the run command in the README. No new inference run or tests were
+  performed for this documentation update.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
 | --- | --- | --- | --- |
 | 0 | Project setup | uv project, dependencies, package, README, PROGRESS, and .gitignore. | Complete |
 | 1 | TinyLlama reference | Load TinyLlama-1.1B with Hugging Face and generate reference text. | Core complete; assignment examples pending |
-| 2 | Understand TinyLlama | Document embeddings, layers, GQA, RoPE, attention, FFN, logits, and KV shapes. | Pending |
+| 2 | Understand TinyLlama | Document embeddings, layers, GQA, RoPE, attention, FFN, logits, and KV shapes. | Complete |
 | 3 | Request / sequence | Prompt tokens, generated tokens, status, and max output length. | Pending |
-| 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Pending |
-| 5 | Manual generation | Greedy generation without HF generate(). | Pending |
+| 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Implemented; verification pending |
+| 5 | Manual generation | Greedy generation without HF generate(). | Implemented; verification pending |
 | 6 | Basic KV cache | Contiguous prefill/decode KV cache; match HF output. | Pending |
 | 7 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Pending |
 | 8 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Pending |

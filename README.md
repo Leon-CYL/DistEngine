@@ -57,6 +57,32 @@ default revision is `main`, which is resolved to a commit and saved under
 uv run python -m distengine.hf_reference --help
 ```
 
+## Run the custom TinyLlama model
+
+From the project root:
+
+```sh
+uv run python -m distengine.manual_generate \
+  --prompt "What is the capital of France?" \
+  --max-new-tokens 32
+```
+
+This loads checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6` in float32,
+copies its weights into the custom PyTorch model, and chooses CUDA, MPS, or CPU
+automatically. It uses the same pinned tokenizer and chat template as the
+reference, then generates greedily without HF `generate()`. It prints generated
+token IDs and decoded text; it does not save a reference JSON file.
+
+Generation handles one unpadded request, stops at EOS or the output limit, and
+recomputes the full sequence at every step. KV caching is planned for stage 6.
+The initial loader temporarily holds both HF and custom weights on CPU, requiring
+roughly 9 GB for float32 weights plus overhead. Model files download on the first
+run if they are not already cached.
+
+Successful custom-model execution and comparison with HF are still pending after
+the RoPE config fix. See [TinyLlama architecture notes](docs/tinyllama.md) for
+the model flow and tensor shapes.
+
 ## How to make a package with uv
 
 For a **new** project, use:
@@ -90,6 +116,8 @@ DistEngine/
 ├── uv.lock
 ├── README.md
 ├── PROGRESS.md
+├── docs/
+│   └── tinyllama.md
 ├── references/
 │   ├── factual.json
 │   ├── factual_repeat.json
@@ -98,9 +126,26 @@ DistEngine/
     └── distengine/
         ├── __init__.py
         ├── __main__.py
-        └── hf_reference.py
+        ├── hf_reference.py
+        ├── load_model.py
+        ├── generation.py
+        ├── manual_generate.py
+        ├── layers/
+        │   ├── __init__.py
+        │   ├── embed_head.py
+        │   ├── linear.py
+        │   ├── layernorm.py
+        │   ├── activation.py
+        │   ├── rotary_embedding.py
+        │   ├── attention.py
+        │   └── sampler.py
+        └── models/
+            ├── __init__.py
+            └── llama.py
 ```
 
 Stage 0 provides the package scaffold and setup command. Stage 1 adds a Hugging
-Face TinyLlama reference with saved token outputs. Engine components will be added
-as their stages are reached.
+Face TinyLlama reference with saved token outputs. Stage 2 documents the architecture;
+stages 4 and 5 now contain the custom model and manual generation implementation,
+with execution verification pending. Engine components will be added as their
+stages are reached.
