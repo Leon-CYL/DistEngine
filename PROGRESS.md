@@ -13,7 +13,7 @@ Status: complete.
 
 ## Stage 1 — TinyLlama reference
 
-Status: core checkpoint complete; additional assignment examples remain.
+Status: complete.
 
 - Implemented `src/distengine/hf_reference.py` with prompt, output-length,
   output-path, and revision arguments.
@@ -37,9 +37,12 @@ Verified saved results on October 6, 2026:
   prompt, generation settings, input token IDs, and generated token IDs all match.
   This verification inspected existing saved results without rerunning inference.
 
-Remaining assignment work: capture the explanation and sentence-completion
-examples with the pinned revision, and write answers to the stage 1 learning
-questions. The README documents the model-running command.
+The user's October 8, 2026 verification run also generated HF references for
+“Explain why the sky is blue in two sentences.” (32 generated tokens) and
+“Complete this sentence: The best way to learn programming is” (21 generated
+tokens), using the same pinned revision. These were compared in memory with the
+custom model; separate reference JSON files were not saved for these examples.
+The README documents the model-running command.
 
 ## Stage 2 — Understand TinyLlama
 
@@ -49,9 +52,30 @@ Status: complete.
   decoder blocks, RMSNorm, GQA, RoPE, causal attention, SwiGLU, and logits.
 - Documented model dimensions, Q/K/V shapes, and planned per-layer KV-cache shapes.
 
+## Stage 3 — Request / sequence
+
+Status: complete.
+
+- Implemented `Request` and `RequestStatus` in `src/distengine/request.py`.
+- Tracks request ID, copied prompt tokens, generated tokens, output limit, EOS,
+  lifecycle status, and finish reason (`reason`).
+- Provides combined token IDs, token counts, and completion state as properties.
+- Enforces `WAITING → RUNNING → FINISHED`; finishes on EOS or output limit.
+- Integrated the request into `generate_greedy()` while preserving its existing
+  tensor input/output interface.
+
+Verification:
+
+- The user ran `distengine.request` successfully and reran `distengine.verify`
+  after integration; all checks passed, including zero logit differences and
+  exact HF token agreement across all three prompts.
+- Additional local checks passed for empty prompts, nonpositive output limits,
+  prompt copying, independent requests, invalid lifecycle operations, length
+  stopping, and EOS priority when EOS reaches the output limit.
+
 ## Stage 4 — Model implementation
 
-Status: implementation complete; execution and correctness verification pending.
+Status: complete.
 
 - Implemented embeddings, LM head, linear projections, RMSNorm, SwiGLU, RoPE,
   and full-sequence causal grouped-query attention in PyTorch.
@@ -62,31 +86,62 @@ Status: implementation complete; execution and correctness verification pending.
 - Scoped the downloaded-model ignore rule to `/models/`, keeping model source
   files under `src/distengine/models/` available for tracking.
 
-The user-reported run on October 8, 2026 loaded HF weights but failed during
-custom model construction because `config.rope_theta` was unavailable. The
-config access has been fixed; a successful rerun has not yet been reported.
+The initial user-reported run on October 8, 2026 failed during custom model
+construction because `config.rope_theta` was unavailable. After the config fix,
+the user's October 8 screenshot confirmed successful model construction, strict
+checkpoint loading, and inference for the factual prompt.
+
+Verified from the user's October 8, 2026 terminal output of
+`uv run python -m distengine.verify`, on MPS with float32 and the pinned checkpoint:
+
+- Logit shapes and finite-value checks passed.
+- Causal masking passed: appending a token preserved earlier-position logits
+  within the script's numerical tolerance.
+- Custom and HF full-sequence logits matched for factual, explanation, and
+  sentence-completion prompts; maximum and mean absolute errors were both zero
+  for every prompt.
 
 ## Stage 5 — Manual generation
 
-Status: implemented; successful execution and HF comparison pending.
+Status: complete.
 
 - Added greedy sampling and a manual generation loop without HF `generate()`.
 - Added `manual_generate.py` with prompt and maximum-output-length arguments.
 - Reuses the pinned tokenizer and chat template; currently supports one unpadded
   request and recomputes the full sequence without a KV cache.
-- Documented the run command in the README. No new inference run or tests were
-  performed for this documentation update.
+- Documented the run command in the README.
+
+Verified from the user's October 8, 2026 screenshot:
+
+- Prompt: “What is the capital of France?” with `--max-new-tokens 32`.
+- Generated token IDs: `[1576, 7483, 310, 3444, 338, 3681, 29889, 2]`.
+- All eight token IDs exactly match the saved HF factual reference.
+- Response: “The capital of France is Paris.”
+- Generation stopped at EOS (`2`) after eight tokens, before the output limit.
+
+The user's October 8, 2026 `distengine.verify` run passed all generation checks:
+
+- Exact HF token agreement for factual (8 tokens), explanation (32 tokens), and
+  sentence-completion (21 tokens) prompts.
+- Repeatability, prompt preservation, output-limit stopping, and factual EOS
+  stopping passed.
+
+Additional local validation confirmed `generate_greedy()` raises `ValueError`
+for an empty prompt, a batch size of two, a one-dimensional input, and zero or
+negative output limits. All stage 4/5 verification checks are complete for the
+current single-request, unpadded, full-sequence implementation. KV-cache
+correctness remains part of stage 6.
 
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
 | --- | --- | --- | --- |
 | 0 | Project setup | uv project, dependencies, package, README, PROGRESS, and .gitignore. | Complete |
-| 1 | TinyLlama reference | Load TinyLlama-1.1B with Hugging Face and generate reference text. | Core complete; assignment examples pending |
+| 1 | TinyLlama reference | Load TinyLlama-1.1B with Hugging Face and generate reference text. | Complete |
 | 2 | Understand TinyLlama | Document embeddings, layers, GQA, RoPE, attention, FFN, logits, and KV shapes. | Complete |
-| 3 | Request / sequence | Prompt tokens, generated tokens, status, and max output length. | Pending |
-| 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Implemented; verification pending |
-| 5 | Manual generation | Greedy generation without HF generate(). | Implemented; verification pending |
+| 3 | Request / sequence | Prompt tokens, generated tokens, status, and max output length. | Complete |
+| 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Complete |
+| 5 | Manual generation | Greedy generation without HF generate(). | Complete |
 | 6 | Basic KV cache | Contiguous prefill/decode KV cache; match HF output. | Pending |
 | 7 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Pending |
 | 8 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Pending |
