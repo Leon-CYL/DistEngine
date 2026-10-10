@@ -7,6 +7,7 @@ from ..layers.activation import SiluAndMul
 from ..layers.attention import LlamaAttention
 from ..layers.layernorm import RMSNorm
 from ..layers.linear import Linear
+from ..paged_kv_cache import PagedKVCache
 
 
 class LlamaMLP(nn.Module):
@@ -66,10 +67,18 @@ class LlamaDecoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
+        cache: PagedKVCache | None = None,
+        layer_index: int = 0,
     ) -> torch.Tensor:
+        
         residual = x
         x = self.input_layernorm(x)
-        x = self.self_attn(x, positions)
+        x = self.self_attn(
+            x,
+            positions,
+            cache=cache,
+            layer_index=layer_index,
+        )
         x = residual + x
 
         residual = x
@@ -121,20 +130,47 @@ class LlamaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
+        cache: PagedKVCache | None = None,
     ) -> torch.Tensor:
+        
         batch_size, sequence_length = input_ids.shape
 
+        past_length = 0
+
+        if cache is not None:
+            if batch_size != 1:
+                raise ValueError("Cached inference supports batch size one")
+
+            if cache.num_layers != len(self.layers):
+                raise ValueError("Cache layer count does not match the model")
+
+            past_length = cache.sequence_length
+
+            if past_length + sequence_length > cache.capacity:
+                raise ValueError("KV cache capacity exceeded")
+
+        expected_positions = torch.arange(
+            past_length,
+            past_length + sequence_length,
+            device=input_ids.device,
+            dtype=torch.long,
+        ).unsqueeze(0).expand(batch_size, -1)
+
         if positions is None:
-            positions = torch.arange(
-                sequence_length,
-                device=input_ids.device,
-                dtype=torch.long,
-            ).unsqueeze(0).expand(batch_size, -1)
+            positions = expected_positions
+        elif cache is not None:
+            if not torch.equal(positions, expected_positions):
+                raise ValueError("Cached positions must continue from the cache length")
 
         x = self.embed_tokens(input_ids)
 
-        for layer in self.layers:
-            x = layer(x, positions)
+        for layer_index, layer in enumerate(self.layers):
+            x = layer(
+                x,
+                positions,
+                cache=cache,
+                layer_index=layer_index,
+            )
 
         return self.norm(x)
     
@@ -155,6 +191,11 @@ class LlamaForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
+        cache: PagedKVCache | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions)
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            cache=cache,
+        )
         return self.lm_head(hidden_states)

@@ -74,13 +74,12 @@ reference, then generates greedily without HF `generate()`. It prints generated
 token IDs and decoded text; it does not save a reference JSON file.
 
 Generation handles one unpadded request, stops at EOS or the output limit, and
-recomputes the full sequence at every step. KV caching is planned for stage 6.
+recomputes the full sequence at every step. Paged KV caching is implemented in stage 6 and verified with `uv run python -m distengine.verify`.
 The initial loader temporarily holds both HF and custom weights on CPU, requiring
 roughly 9 GB for float32 weights plus overhead. Model files download on the first
 run if they are not already cached.
 
-Successful custom-model execution and comparison with HF are still pending after
-the RoPE config fix. See [TinyLlama architecture notes](docs/tinyllama.md) for
+Custom-model execution and HF comparison have passed, including paged KV caching. See [TinyLlama architecture notes](docs/tinyllama.md) for
 the model flow and tensor shapes.
 
 ## How to make a package with uv
@@ -146,6 +145,6 @@ DistEngine/
 
 Stage 0 provides the package scaffold and setup command. Stage 1 adds a Hugging
 Face TinyLlama reference with saved token outputs. Stage 2 documents the architecture;
-stages 4 and 5 now contain the custom model and manual generation implementation,
-with execution verification pending. Engine components will be added as their
+stages 3–6 implement requests, the custom model, manual generation, and paged
+KV caching, with correctness verification complete. Engine components will be added as their
 stages are reached.

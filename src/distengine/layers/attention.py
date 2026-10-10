@@ -3,6 +3,7 @@ from torch import nn
 
 from .linear import Linear
 from .rotary_embedding import RotaryEmbedding
+from ..paged_kv_cache import PagedKVCache
 
 
 class Attention(nn.Module):
@@ -36,13 +37,24 @@ class Attention(nn.Module):
         scores = (q @ k.transpose(-2, -1)) * self.scale
         # scores: [B, num_heads, T, T]
 
-        sequence_length = q.shape[-2]
-        future_mask = torch.ones(
-            sequence_length,
-            sequence_length,
-            dtype=torch.bool,
+        query_length = q.shape[-2]
+        key_length = k.shape[-2]
+
+        if key_length < query_length:
+            raise ValueError("Key length must be at least query length")
+
+        past_length = key_length - query_length
+
+        query_positions = past_length + torch.arange(
+            query_length,
             device=q.device,
-        ).triu(diagonal=1)
+        )
+        key_positions = torch.arange(
+            key_length,
+            device=q.device,
+        )
+
+        future_mask = (key_positions.unsqueeze(0) > query_positions.unsqueeze(1))
 
         scores = scores.masked_fill(future_mask, float("-inf"))
 
@@ -95,6 +107,8 @@ class LlamaAttention(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
+        cache: PagedKVCache | None = None,
+        layer_index: int = 0,
     ) -> torch.Tensor:
         batch_size, sequence_length, _ = x.shape
 
@@ -112,6 +126,9 @@ class LlamaAttention(nn.Module):
 
         q, k = self.rotary_emb(q, k, positions)
 
+        if cache is not None:
+            k, v = cache.append(layer_index, k, v)
+
         context = self.attn(q, k, v)
 
         context = context.transpose(1, 2).contiguous().view(
@@ -121,3 +138,58 @@ class LlamaAttention(nn.Module):
         )
 
         return self.o_proj(context)
+    
+    
+      
+def main():
+    torch.manual_seed(0)
+
+    attention = Attention(
+        num_heads=4,
+        num_kv_heads=2,
+        head_dim=4,
+    )
+
+    q = torch.randn(1, 4, 5, 4)
+    k = torch.randn(1, 2, 5, 4)
+    v = torch.randn(1, 2, 5, 4)
+
+    full = attention(q, k, v)
+
+    # One-token decode: final query sees all five keys.
+    decoded = attention(q[:, :, -1:, :], k, v)
+
+    torch.testing.assert_close(
+        decoded,
+        full[:, :, -1:, :],
+        atol=1e-6,
+        rtol=1e-5,
+    )
+
+    # Two-token suffix: queries represent positions 3 and 4.
+    chunk = attention(q[:, :, -2:, :], k, v)
+
+    torch.testing.assert_close(
+        chunk,
+        full[:, :, -2:, :],
+        atol=1e-6,
+        rtol=1e-5,
+    )
+
+    # Changing the future value must not affect earlier outputs.
+    changed_v = v.clone()
+    changed_v[:, :, -1, :] += 100
+    changed = attention(q, k, changed_v)
+
+    torch.testing.assert_close(
+        changed[:, :, :-1, :],
+        full[:, :, :-1, :],
+        atol=1e-6,
+        rtol=1e-5,
+    )
+
+    print("PASS: full, decode, chunk, and causal attention checks")
+
+
+if __name__ == "__main__":
+    main()

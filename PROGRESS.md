@@ -132,6 +132,34 @@ negative output limits. All stage 4/5 verification checks are complete for the
 current single-request, unpadded, full-sequence implementation. KV-cache
 correctness remains part of stage 6.
 
+## Stage 6 — Paged KV cache
+
+Status: complete.
+
+- Implemented `PagedKVCache` with fixed-size physical KV blocks and a copied
+  logical-to-physical block table for one request.
+- Validates block IDs, input shapes, device, dtype, and mapped capacity; supports
+  per-layer append, logical-order reads, consistent lengths, and reset/reuse.
+- Gathers valid paged K/V into contiguous temporary tensors for existing eager
+  attention. Model and cached generation interfaces use the paged cache backend.
+
+Verification:
+
+- Local storage checks passed exact equality with expected token histories, shuffled block
+  mappings, boundary crossings, partial blocks, overflow, and reset/reuse.
+- Local tiny-model checks passed prefill, decode, chunks, generation agreement,
+  length tracking, and cache guards for the paged backend.
+- The user's October 10, 2026 `distengine.verify` run passed on MPS with float32
+  and checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6`.
+- Paged generation exactly matched uncached output for all
+  three prompts; the outputs also matched HF (8, 32, and 21 generated tokens).
+- Paged real-checkpoint cached logits matched the uncached baseline
+  within `atol=1e-4`, `rtol=1e-4`. Existing stage 4/5 checks also passed.
+
+Scope: one request per cache object with an explicit block table. Shared storage,
+block allocation, freeing, and reuse management are stage 7; direct attention
+over pages is not implemented.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
@@ -142,28 +170,44 @@ correctness remains part of stage 6.
 | 3 | Request / sequence | Prompt tokens, generated tokens, status, and max output length. | Complete |
 | 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Complete |
 | 5 | Manual generation | Greedy generation without HF generate(). | Complete |
-| 6 | Basic KV cache | Contiguous prefill/decode KV cache; match HF output. | Pending |
-| 7 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Pending |
-| 8 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Pending |
-| 9 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Pending |
-| 10 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Pending |
-| 11 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Pending |
-| 12 | Separate prefill/decode roles | Explicit local PrefillWorker and DecodeWorker roles. | Pending |
-| 13 | Two-GPU DistEngine | Prefill and decode on separate GPUs; confirm output correctness. | Pending |
-| 14 | KV transfer | Simple worker transfer, initially GPU → CPU → GPU if necessary. | Pending |
-| 15 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Pending |
-| 16 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Pending |
-| 17 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Pending |
-| 18 | Multiple prefill workers | Independent prefill workers and request queues. | Pending |
-| 19 | Prefill work stealing | Steal unstarted whole requests; enable/disable switch. | Pending |
-| 20 | Multiple decode workers | Simple placement; keep each request on its assigned decode worker. | Pending |
-| 21 | Ray orchestration | Thin GPU/process actors; inference stays in normal Python classes. | Pending |
-| 22 | Modal deployment | Start with one prefill GPU and one decode GPU; scale as necessary. | Pending |
-| 23 | Workload generator | Constant and Poisson arrivals with reproducible seeds. | Pending |
-| 24 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work. | Pending |
-| 25 | Metrics instrumentation | TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy. | Pending |
-| 26 | Final benchmark | Compare exactly the same workload with and without stealing. | Pending |
-| 27 | Cleanup + report | Simplify code; document architecture, results, limitations, and RDMA/FlashInfer/TP future work. | Pending |
+| 6 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Complete |
+| 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Pending |
+| 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Pending |
+| 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Pending |
+| 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Pending |
+| 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Pending |
+| 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Pending |
+| 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Pending |
+| 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Pending |
+| 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Pending |
+| 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Pending |
+| 17 | Multiple prefill workers | Independent prefill workers and request queues. | Pending |
+| 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Pending |
+| 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Pending |
+| 20 | Metrics + baseline benchmark | Instrument TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy; save a no-stealing baseline before implementing stealing. | Pending |
+| 21 | Prefill work stealing + initial comparison | Steal unstarted whole requests; add an enable/disable switch; replay the frozen workload in both modes with identical configuration. | Pending |
+| 22 | Multiple decode workers | Simple placement; keep each request on its assigned decode worker. | Pending |
+| 23 | Modal deployment | Start with one prefill GPU and one decode GPU; scale as necessary. | Pending |
+| 24 | Final benchmark | Repeat the controlled stealing-disabled/enabled comparison on the final system; analyze performance and correctness against the saved baseline. | Pending |
+| 25 | Cleanup + report | Simplify code; document architecture, results, limitations, and RDMA/FlashInfer/TP future work. | Pending |
+
+## Benchmark checkpoints
+
+- Stage 20 establishes the baseline before stealing is implemented, using the
+  multiple-prefill-worker system from stage 17 and the workloads from stages
+  18–19. Save raw measurements, workload inputs, and system configuration.
+- Stage 21 performs the first comparison after implementing stealing. Run both
+  disabled and enabled modes on the same code revision and configuration;
+  retain the earlier baseline to detect unrelated regressions.
+- Stage 24 repeats both modes on the final deployed system. If hardware, worker
+  counts, or deployment changes after stage 21, capture a fresh disabled baseline
+  on that system before comparing it with enabled stealing.
+
+For each comparison, keep model revision, dtype, worker counts, hardware, queue
+and KV limits, request inputs, arrival schedule, and seeds identical. Use the
+same warm-up procedure, repeat runs, define goodput thresholds in advance, and
+verify matching request outputs. Report latency distributions and variation
+across runs alongside throughput and goodput.
 
 ## Verification
 

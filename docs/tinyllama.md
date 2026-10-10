@@ -92,7 +92,8 @@ Greedy generation selects `argmax` from the final position's logits, appends tha
 token, and repeats until EOS or the output limit. The current implementation
 recomputes the whole sequence at every step and supports one unpadded request.
 
-A future KV cache will retain each layer's already-computed keys and values:
+The paged KV cache retains each layer's already-computed keys and values.
+Its logical attention views have these shapes:
 
 ```text
 K cache per layer: [B, 4, cached_length, 64]  (after RoPE)
@@ -102,7 +103,7 @@ V cache per layer: [B, 4, cached_length, 64]
 Prefill processes the prompt and fills those caches. Decode processes one new
 token at its absolute position and attends to cached K/V. Cache storage keeps
 four KV heads, rather than the 32 heads expanded for attention. KV caching is
-planned for stage 6 and is not implemented yet.
+implemented with paged storage in stage 6.
 
 ## Source files
 
