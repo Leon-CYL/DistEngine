@@ -189,6 +189,40 @@ Verification on October 10, 2026:
   and 21 tokens). Causal masking, repeatability, output-limit stopping, and
   factual EOS stopping also passed.
 
+## Stage 8 — Model runner
+
+Status: implemented; remaining runner verification pending.
+
+- Added `ModelRunner` with model device/dtype and shared-storage validation,
+  request validation, token/absolute-position preparation, prefill, decode,
+  and explicit cache release.
+- Executes one request per model call using manager-backed shared KV storage.
+  Decode grows block mappings as needed and processes the latest generated token;
+  the newly sampled token remains uncached until the next step.
+- Added CPU-only `distengine.verify_runner` assertions for the runner lifecycle
+  and generation agreement with the uncached tiny-model baseline.
+
+Verified from the user's October 11, 2026 screenshot and terminal output:
+
+- `distengine.verify_runner` passed input tensors, positions, validation,
+  prefill/decode, block growth, interleaved generation agreement, release,
+  block reuse, output-limit/EOS stopping, unfinished cleanup, and repeated release.
+- `distengine.verify_blocks` and `distengine.verify_cache` passed.
+- Existing `distengine.verify` regressions passed on MPS with float32 and
+  checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6`: paged generation,
+  cached logits, causal masking, repeatability, output-limit stopping, and
+  factual EOS stopping. Custom/HF logits had zero maximum and mean error;
+  generated tokens matched exactly for all three prompts (8, 32, and 21 tokens).
+  These real-checkpoint checks exercise the existing generation paths, not
+  `ModelRunner` itself.
+
+Remaining before completion:
+
+- Verify runner admission/decode exhaustion preserves existing state and that
+  model-execution failures release partially written caches and block ownership.
+- Verify real TinyLlama generation through `ModelRunner` against the baseline
+  for the three reference prompts.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
@@ -201,7 +235,7 @@ Verification on October 10, 2026:
 | 5 | Manual generation | Greedy generation without HF generate(). | Complete |
 | 6 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Complete |
 | 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Complete |
-| 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Pending |
+| 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Implemented; verification pending |
 | 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Pending |
 | 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Pending |
 | 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Pending |
