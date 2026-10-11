@@ -1,6 +1,21 @@
 import torch
 
 
+class KVStorage:
+    """Physical K/V tensors shared by request-local cache views."""
+
+    def __init__(self, num_layers: int, num_kv_heads: int, head_dim: int,
+                 num_physical_blocks: int, block_size: int,
+                 device: torch.device, dtype: torch.dtype) -> None:
+        dimensions = (num_layers, num_physical_blocks, num_kv_heads, block_size, head_dim)
+        if any(type(value) is not int or value <= 0 for value in dimensions):
+            raise ValueError("Storage dimensions must be positive integers")
+        if not dtype.is_floating_point:
+            raise ValueError("KV cache dtype must be floating point")
+        self.k_cache = torch.empty(dimensions, device=device, dtype=dtype)
+        self.v_cache = torch.empty_like(self.k_cache)
+
+
 class PagedKVCache:
     def __init__(
         self,
@@ -12,6 +27,7 @@ class PagedKVCache:
         block_table: list[int],
         device: torch.device,
         dtype: torch.dtype,
+        storage: KVStorage | None = None,
     ) -> None:
         for name, value in (
             ("num_layers", num_layers),
@@ -20,14 +36,11 @@ class PagedKVCache:
             ("num_physical_blocks", num_physical_blocks),
             ("block_size", block_size),
         ):
-            if value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be positive")
             
         if not dtype.is_floating_point:
             raise ValueError("KV cache dtype must be floating point")
-
-        if not block_table:
-            raise ValueError("block_table must not be empty")
 
         if any(type(block_id) is not int for block_id in block_table):
             raise ValueError("Block IDs must be integers")
@@ -61,9 +74,32 @@ class PagedKVCache:
             self.head_dim,
         )
 
-        self.k_cache = torch.empty(shape, device=self.device, dtype=self.dtype)
-        self.v_cache = torch.empty(shape, device=self.device, dtype=self.dtype)
+        if storage is None:
+            storage = KVStorage(num_layers, num_kv_heads, head_dim,
+                                num_physical_blocks, block_size, self.device, dtype)
+        resolved_device = torch.empty(0, device=self.device).device
+        for tensor in (storage.k_cache, storage.v_cache):
+            if tuple(tensor.shape) != shape:
+                raise ValueError("Shared storage shape does not match cache dimensions")
+            if tensor.dtype != dtype or tensor.device != resolved_device:
+                raise ValueError("Shared storage device or dtype does not match cache")
+        self.storage = storage
+        self.k_cache = storage.k_cache
+        self.v_cache = storage.v_cache
         
+
+    def update_block_table(self, block_table: list[int]) -> None:
+        """Install a manager-provided expansion without moving existing tokens."""
+        table = block_table.copy()
+        if any(type(block_id) is not int or not 0 <= block_id < self.num_physical_blocks
+               for block_id in table):
+            raise ValueError("Block IDs must be integers in the physical storage range")
+        if len(set(table)) != len(table):
+            raise ValueError("Block IDs must be unique")
+        if len(table) < len(self.block_table) or table[:len(self.block_table)] != self.block_table:
+            raise ValueError("An updated block table must preserve the existing prefix")
+        self.block_table = table
+        self.capacity = len(table) * self.block_size
 
     @property
     def sequence_length(self) -> int:

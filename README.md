@@ -148,3 +148,29 @@ Face TinyLlama reference with saved token outputs. Stage 2 documents the archite
 stages 3–6 implement requests, the custom model, manual generation, and paged
 KV caching, with correctness verification complete. Engine components will be added as their
 stages are reached.
+
+## Block manager and shared KV storage (Stage 7)
+
+Run the CPU-only allocation and shared-cache checks:
+
+```bash
+uv run python -m distengine.verify_blocks
+```
+
+`BlockManager` owns block assignments. `allocate()` registers a request,
+`ensure_capacity()` grows its total token capacity without shrinking, and
+`free()` releases its blocks. Invalid arguments raise `ValueError`, unknown
+requests raise `KeyError`, and insufficient capacity raises `RuntimeError`
+without changing assignments. Zero-token requests have empty block tables.
+
+Create one `KVStorage` for a physical pool and pass it as `storage=` to each
+`PagedKVCache` with matching dimensions, device, and dtype. Each view keeps its
+own lengths and manager-provided block table. Install the result of
+`ensure_capacity()` with `cache.update_block_table(table)` before appending.
+Updates preserve existing mappings and lengths. Returned manager tables are copies.
+
+Retire a request's cache view before calling `free()`; old views must never be
+used after release. New views start with zero lengths, so reused blocks expose
+only newly written tokens. `reset()` clears valid lengths while retaining block
+ownership. The caller must use manager-assigned, disjoint mappings for active
+requests; cache views do not enforce ownership themselves.

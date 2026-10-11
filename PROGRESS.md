@@ -156,9 +156,38 @@ Verification:
 - Paged real-checkpoint cached logits matched the uncached baseline
   within `atol=1e-4`, `rtol=1e-4`. Existing stage 4/5 checks also passed.
 
-Scope: one request per cache object with an explicit block table. Shared storage,
-block allocation, freeing, and reuse management are stage 7; direct attention
-over pages is not implemented.
+Stage 6 scope: one request per cache object with an explicit block table.
+Stage 7 adds shared storage, block allocation, freeing, and reuse management;
+direct attention over pages is not implemented.
+
+## Stage 7 — Block manager
+
+Status: complete.
+
+- Added `BlockManager` with deterministic allocation, total-capacity growth,
+  free/reuse, free-block tracking, copied mappings, and strict argument validation.
+- Zero-token requests register empty mappings; unknown requests and repeated
+  frees raise `KeyError`. Capacity failures preserve ownership and free blocks.
+- Added shared `KVStorage` and request-local `PagedKVCache` views, including
+  empty views and prefix-preserving block-table expansion.
+- Cache views must be retired before freeing their blocks; new views start with
+  zero valid lengths. Ownership enforcement remains the caller's responsibility.
+- Added `distengine.verify_blocks` and README usage/lifecycle instructions.
+
+Verification on October 10, 2026:
+
+- CPU allocation checks passed boundaries, validation, copies, disjoint ownership,
+  growth, atomic exhaustion, and freeing/reuse.
+- Shared CPU storage checks passed interleaved request isolation, cache growth,
+  invalid mapping rejection, empty-view growth, reset, and stale-data exclusion.
+- Existing `distengine.verify_cache` tiny-model prefill/decode/generation checks
+  and `distengine.paged_kv_cache` storage checks passed.
+- The user's full verification run passed on MPS with float32 and checkpoint
+  `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Paged generation and cached
+  logits matched the uncached baseline for all three prompts. Custom/HF logits
+  had zero maximum and mean error; generated tokens matched exactly (8, 32,
+  and 21 tokens). Causal masking, repeatability, output-limit stopping, and
+  factual EOS stopping also passed.
 
 ## Roadmap
 
@@ -171,7 +200,7 @@ over pages is not implemented.
 | 4 | Model implementation | Minimal TinyLlama model components in PyTorch. | Complete |
 | 5 | Manual generation | Greedy generation without HF generate(). | Complete |
 | 6 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Complete |
-| 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Pending |
+| 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Complete |
 | 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Pending |
 | 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Pending |
 | 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Pending |
