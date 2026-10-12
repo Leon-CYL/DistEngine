@@ -191,7 +191,7 @@ Verification on October 10, 2026:
 
 ## Stage 8 — Model runner
 
-Status: implemented; remaining runner verification pending.
+Status: complete.
 
 - Added `ModelRunner` with model device/dtype and shared-storage validation,
   request validation, token/absolute-position preparation, prefill, decode,
@@ -199,8 +199,9 @@ Status: implemented; remaining runner verification pending.
 - Executes one request per model call using manager-backed shared KV storage.
   Decode grows block mappings as needed and processes the latest generated token;
   the newly sampled token remains uncached until the next step.
-- Added CPU-only `distengine.verify_runner` assertions for the runner lifecycle
-  and generation agreement with the uncached tiny-model baseline.
+- Added `distengine.verify_runner` assertions for the runner lifecycle,
+  failure handling, and generation agreement, plus optional `--checkpoint`
+  verification against the pinned TinyLlama uncached baseline.
 
 Verified from the user's October 11, 2026 screenshot and terminal output:
 
@@ -216,12 +217,45 @@ Verified from the user's October 11, 2026 screenshot and terminal output:
   These real-checkpoint checks exercise the existing generation paths, not
   `ModelRunner` itself.
 
-Remaining before completion:
+Additional local verification on October 11, 2026:
 
-- Verify runner admission/decode exhaustion preserves existing state and that
-  model-execution failures release partially written caches and block ownership.
-- Verify real TinyLlama generation through `ModelRunner` against the baseline
-  for the three reference prompts.
+- Admission/decode exhaustion preserved tokens, cache lengths, mappings, and
+  cached values; decode succeeded after another request released capacity.
+- Injected prefill/decode failures after first-layer KV writes released the
+  affected allocation (including decode growth) and preserved another request
+  whose decode subsequently succeeded. All CPU runner checks passed.
+
+- `distengine.verify_runner --checkpoint` passed locally on CPU with float32
+  and pinned checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Runner
+  generation exactly matched the uncached baseline for factual (8 tokens),
+  explanation (32 tokens), and sentence-completion (21 tokens) prompts. Cache
+  length tracking and full block release passed for each real-checkpoint request.
+
+## Stage 9 — Basic scheduler
+
+Status: complete for sequential, single-active-request FIFO execution.
+
+- Added `Scheduler` with waiting/running/finished queues, lifetime request-ID
+  reservation, fresh-runner checks, and explicit admission rejection.
+- Admission checks the maximum cached history using ceiling division, including
+  the uncached final output token adjustment. Each step performs one prefill or
+  decode call and returns the request that advanced; empty steps return `None`.
+- Completed requests release cache ownership before moving into finished history.
+  Failed requests leave the running queue, release any remaining cache, and
+  propagate the error while preserving later waiting requests. Failed requests
+  retain their current status and reserved ID and do not enter finished history.
+- Added `distengine.verify_scheduler`; batching and multiple active requests
+  remain outside this stage's scope.
+
+Verified locally on October 11, 2026 with a small CPU model:
+
+- FIFO execution, exactly one model call per step, exact uncached generation
+  agreement, output-limit/EOS stopping, block reuse, and empty steps passed.
+- Duplicate IDs, oversized requests, invalid lifecycle/tokens, and initialization
+  with active caches or zero-block registered requests were rejected.
+- Prefill/decode failures before execution and after partial KV writes released
+  resources and allowed the subsequent waiting request to finish correctly.
+- All CPU `distengine.verify_runner` regression checks passed.
 
 ## Roadmap
 
@@ -235,8 +269,8 @@ Remaining before completion:
 | 5 | Manual generation | Greedy generation without HF generate(). | Complete |
 | 6 | Paged KV cache | Fixed-size KV blocks and per-request block tables. | Complete |
 | 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Complete |
-| 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Implemented; verification pending |
-| 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Pending |
+| 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Complete |
+| 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Complete |
 | 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Pending |
 | 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Pending |
 | 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Pending |

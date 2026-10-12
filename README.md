@@ -174,3 +174,39 @@ used after release. New views start with zero lengths, so reused blocks expose
 only newly written tokens. `reset()` clears valid lengths while retaining block
 ownership. The caller must use manager-assigned, disjoint mappings for active
 requests; cache views do not enforce ownership themselves.
+
+## Model runner verification (Stage 8)
+
+Run the small CPU model checks, including capacity exhaustion and cleanup after
+partial KV-write failures:
+
+```bash
+uv run python -m distengine.verify_runner
+```
+
+Also compare runner generation against uncached generation with the pinned
+TinyLlama checkpoint for the three reference prompts:
+
+```bash
+uv run python -m distengine.verify_runner --checkpoint
+```
+
+The checkpoint mode loads model weights and uses the available model device.
+Each request is explicitly started, prefills its prompt, decodes one pending
+token at a time, and releases its cache and block allocation when finished.
+
+## FIFO scheduler (Stage 9)
+
+Run sequential scheduling and failure-cleanup checks with a small CPU model:
+
+```bash
+uv run python -m distengine.verify_scheduler
+```
+
+`Scheduler` exclusively controls a fresh runner and block pool. Submit waiting
+requests with `add_request()` and call `step()` while `has_pending_requests` is
+true. Each step advances one request with one model call; completed requests
+release their blocks and enter `finished`. IDs stay reserved for the scheduler's
+lifetime. Requests whose maximum cached history exceeds the pool are rejected.
+Execution failures release resources and propagate; later waiting requests stay
+queued. Failed requests retain their status and are not recorded as finished.

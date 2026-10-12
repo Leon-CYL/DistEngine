@@ -56,6 +56,7 @@ class ModelRunner:
         self.sampler = GreedySampler()
         self.caches: dict[str, PagedKVCache] = {}
 
+
     def _validate_request(self, request: Request) -> None:
         if not isinstance(request, Request):
             raise ValueError("Expected a Request")

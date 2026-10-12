@@ -1,4 +1,7 @@
 """Small CPU assertions for ModelRunner; no model download required."""
+import argparse
+from unittest.mock import patch
+
 import torch
 from transformers import LlamaConfig
 
@@ -111,8 +114,134 @@ def main():
     check_release(runner, unfinished)
     assert manager.num_free_blocks == manager.num_blocks
     print('PASS: block reuse, output-limit/EOS stopping, unfinished cleanup, repeated release')
+    check_failures(model)
     print('All CPU runner checks passed.')
 
 
+def make_runner(model, blocks):
+    config = model.config
+    parameter = next(model.parameters())
+    heads = config.num_key_value_heads or config.num_attention_heads
+    manager = BlockManager(blocks, 4)
+    storage = KVStorage(config.num_hidden_layers, heads,
+                        config.hidden_size // config.num_attention_heads,
+                        blocks, 4, parameter.device, parameter.dtype)
+    return ModelRunner(model, manager, storage)
+
+
+def state(runner, request):
+    cache = runner.caches[request.request_id]
+    return (request.token_ids, request.status, request.reason,
+            cache.lengths.copy(), cache.block_table.copy(),
+            runner.block_manager.free_blocks.copy(),
+            {k: v.copy() for k, v in runner.block_manager.request_blocks.items()})
+
+
+@torch.inference_mode()
+def check_failures(model):
+    runner = make_runner(model, 2)
+    active = Request('active', [10, 20, 30, 40], 4, -1)
+    active.start()
+    runner.prefill(active)
+    blocker = Request('blocker', [50], 4, -1)
+    blocker.start()
+    runner.prefill(blocker)
+    before = state(runner, active)
+    cached = [tuple(t.clone() for t in runner.caches['active'].read(i)) for i in range(2)]
+    waiting = Request('waiting', [10], 4, -1)
+    waiting.start()
+    raises(RuntimeError, lambda: runner.prefill(waiting))
+    assert waiting.generated_token_ids == [] and waiting.request_id not in runner.caches
+    assert state(runner, active) == before
+    raises(RuntimeError, lambda: runner.decode(active))
+    assert state(runner, active) == before
+    for i, pair in enumerate(cached):
+        assert all(torch.equal(a, b) for a, b in zip(pair, runner.caches['active'].read(i)))
+    runner.release(blocker)
+    runner.decode(active)  # Retry succeeds after capacity becomes available.
+    runner.release(active)
+    assert runner.block_manager.num_free_blocks == 2
+    print('PASS: admission/decode exhaustion preserves state and supports retry')
+
+    runner = make_runner(model, 6)
+    survivor = Request('survivor', [50], 4, -1)
+    survivor.start()
+    runner.prefill(survivor)
+    survivor_tokens = survivor.token_ids
+    survivor_cache = [tuple(t.clone() for t in runner.caches['survivor'].read(i)) for i in range(2)]
+    observed = []
+    def fail_after_first_layer(input_ids, positions=None, cache=None):
+        k = torch.zeros(1, cache.num_kv_heads, input_ids.shape[1], cache.head_dim,
+                        device=cache.device, dtype=cache.dtype)
+        cache.append(0, k, k)
+        observed.append(cache.lengths.copy())
+        raise RuntimeError('Injected failure after partial KV writes')
+
+    for phase in ('prefill', 'decode'):
+        request = Request(phase, [10, 20, 30, 40], 4, -1)
+        request.start()
+        free_before = runner.block_manager.num_free_blocks
+        if phase == 'decode':
+            runner.prefill(request)
+        tokens_before = request.token_ids
+        with patch.object(model, 'forward', side_effect=fail_after_first_layer):
+            raises(RuntimeError, lambda: getattr(runner, phase)(request))
+        assert observed[-1][0] != observed[-1][1]
+        assert request.token_ids == tokens_before
+        assert request.request_id not in runner.caches
+        assert request.request_id not in runner.block_manager.request_blocks
+        assert runner.block_manager.num_free_blocks == free_before
+        assert survivor.token_ids == survivor_tokens
+        for i, pair in enumerate(survivor_cache):
+            assert all(torch.equal(a, b) for a, b in zip(pair, runner.caches['survivor'].read(i)))
+    runner.decode(survivor)
+    runner.release(survivor)
+    assert runner.block_manager.num_free_blocks == 6
+    print('PASS: prefill/decode partial-write failures free blocks and preserve other requests')
+
+
+@torch.inference_mode()
+def check_checkpoint():
+    from transformers import AutoTokenizer
+    from .hf_reference import choose_device
+    from .load_model import MODEL_ID, REVISION, load_model
+
+    device = choose_device()
+    print(f'Runner checkpoint: {REVISION}; device: {device}; dtype: float32', flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=REVISION)
+    model = load_model(device)
+    prompts = [
+        'What is the capital of France?',
+        'Explain why the sky is blue in two sentences.',
+        'Complete this sentence: The best way to learn programming is',
+    ]
+    for index, prompt in enumerate(prompts):
+        formatted = tokenizer.apply_chat_template(
+            [{'role': 'user', 'content': prompt}], tokenize=False, add_generation_prompt=True)
+        ids = tokenizer(formatted, add_special_tokens=False, return_tensors='pt')['input_ids'].to(device)
+        expected = generate_greedy(model, ids, 32, tokenizer.eos_token_id)[0].tolist()
+        runner = make_runner(model, (ids.shape[1] + 32 + 3) // 4)
+        request = Request(f'checkpoint-{index}', ids[0].tolist(), 32, tokenizer.eos_token_id)
+        request.start()
+        try:
+            runner.prefill(request)
+            while not request.is_finished:
+                runner.decode(request)
+            assert request.token_ids == expected
+            assert runner.caches[request.request_id].sequence_length == len(expected) - 1
+            print(f'PASS: runner exact baseline agreement ({request.num_generated_tokens} tokens): {prompt}', flush=True)
+        finally:
+            if request.request_id in runner.caches:
+                runner.release(request)
+        assert runner.block_manager.num_free_blocks == runner.block_manager.num_blocks
+    print('All real-checkpoint runner checks passed.', flush=True)
+
+
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--checkpoint', action='store_true',
+                        help='Also compare the runner with the pinned TinyLlama baseline')
+    args = parser.parse_args()
     main()
+    if args.checkpoint:
+        check_checkpoint()
