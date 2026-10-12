@@ -2,12 +2,12 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from ..layers.embed_head import LMHead, TokenEmbedding
-from ..layers.activation import SiluAndMul
-from ..layers.attention import LlamaAttention
-from ..layers.layernorm import RMSNorm
-from ..layers.linear import Linear
-from ..paged_kv_cache import PagedKVCache
+from layers.embed_head import LMHead, TokenEmbedding
+from layers.activation import SiluAndMul
+from layers.attention import LlamaAttention
+from layers.layernorm import RMSNorm
+from layers.linear import Linear
+from distengine.paged_kv_cache import PagedKVCache
 
 
 class LlamaMLP(nn.Module):

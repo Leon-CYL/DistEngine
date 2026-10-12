@@ -29,7 +29,7 @@ Ray and Modal will be added when their stages are implemented.
 From the project root, run this command in your terminal:
 
 ```sh
-uv run python -m distengine.hf_reference \
+uv run python -m hf_reference \
   --prompt "What is the capital of France?" \
   --max-new-tokens 32 \
   --output references/factual.json \
@@ -48,13 +48,13 @@ For a repeated run, use the same command with
 `--output references/factual_repeat.json`. Keep the prompt, revision, output
 length, device, dtype, and library versions the same when comparing token IDs.
 
-You can also run `uv run python -m distengine.hf_reference` with defaults. Its
+You can also run `uv run python -m hf_reference` with defaults. Its
 default revision is `main`, which is resolved to a commit and saved under
 `resolved_revision` in `references/tinyllama_hf.json`. Use that commit with
 `--revision` for subsequent comparisons. View all options with:
 
 ```sh
-uv run python -m distengine.hf_reference --help
+uv run python -m hf_reference --help
 ```
 
 ## Run the custom TinyLlama model
@@ -62,7 +62,7 @@ uv run python -m distengine.hf_reference --help
 From the project root:
 
 ```sh
-uv run python -m distengine.manual_generate \
+uv run python -m manual_generate \
   --prompt "What is the capital of France?" \
   --max-new-tokens 32
 ```
@@ -74,7 +74,7 @@ reference, then generates greedily without HF `generate()`. It prints generated
 token IDs and decoded text; it does not save a reference JSON file.
 
 Generation handles one unpadded request, stops at EOS or the output limit, and
-recomputes the full sequence at every step. Paged KV caching is implemented in stage 6 and verified with `uv run python -m distengine.verify`.
+recomputes the full sequence at every step. Paged KV caching is implemented in stage 6 and verified with `uv run python -m verify`.
 The initial loader temporarily holds both HF and custom weights on CPU, requiring
 roughly 9 GB for float32 weights plus overhead. Model files download on the first
 run if they are not already cached.
@@ -97,7 +97,8 @@ uv build
 This repository is already initialized, so start with `uv sync --locked`.
 `--package` creates an installable package and a build backend in `pyproject.toml`.
 The distribution name is `distengine`; Python imports it as `import distengine`.
-Code lives in `src/distengine/`, and `[project.scripts]` maps the `distengine`
+Engine code lives in `src/distengine/`, with model architecture in `src/models/`,
+layers in `src/layers/`, and standalone tools directly under `src/`. `[project.scripts]` maps the `distengine`
 command to `distengine.main`. `uv build` writes a wheel and source archive to `dist/`.
 Building is separate from publishing; it does not upload anything.
 
@@ -122,39 +123,52 @@ DistEngine/
 │   ├── factual_repeat.json
 │   └── tinyllama_hf.json
 └── src/
-    └── distengine/
-        ├── __init__.py
-        ├── __main__.py
-        ├── hf_reference.py
-        ├── load_model.py
-        ├── generation.py
-        ├── manual_generate.py
-        ├── layers/
-        │   ├── __init__.py
-        │   ├── embed_head.py
-        │   ├── linear.py
-        │   ├── layernorm.py
-        │   ├── activation.py
-        │   ├── rotary_embedding.py
-        │   ├── attention.py
-        │   └── sampler.py
-        └── models/
-            ├── __init__.py
-            └── llama.py
+    ├── distengine/
+    │   ├── __init__.py
+    │   ├── __main__.py
+    │   ├── engine.py
+    │   ├── scheduler.py
+    │   ├── model_runner.py
+    │   ├── block_manager.py
+    │   ├── paged_kv_cache.py
+    │   └── request.py
+    ├── models/
+    │   ├── __init__.py
+    │   └── llama.py
+    ├── layers/
+    │   ├── __init__.py
+    │   ├── embed_head.py
+    │   ├── linear.py
+    │   ├── layernorm.py
+    │   ├── activation.py
+    │   ├── rotary_embedding.py
+    │   ├── attention.py
+    │   └── sampler.py
+    ├── generation.py
+    ├── load_model.py
+    ├── hf_reference.py
+    ├── manual_generate.py
+    ├── verify.py
+    ├── verify_blocks.py
+    ├── verify_cache.py
+    ├── verify_runner.py
+    ├── verify_scheduler.py
+    └── verify_engine.py
 ```
 
 Stage 0 provides the package scaffold and setup command. Stage 1 adds a Hugging
 Face TinyLlama reference with saved token outputs. Stage 2 documents the architecture;
 stages 3–6 implement requests, the custom model, manual generation, and paged
-KV caching, with correctness verification complete. Engine components will be added as their
-stages are reached.
+KV caching, with correctness verification complete. Stages 7–9 add block management,
+the model runner, and FIFO scheduling. Stage 10 engine integration is verified on
+CPU/MPS; NVIDIA GPU execution remains pending.
 
 ## Block manager and shared KV storage (Stage 7)
 
 Run the CPU-only allocation and shared-cache checks:
 
 ```bash
-uv run python -m distengine.verify_blocks
+uv run python -m verify_blocks
 ```
 
 `BlockManager` owns block assignments. `allocate()` registers a request,
@@ -181,14 +195,14 @@ Run the small CPU model checks, including capacity exhaustion and cleanup after
 partial KV-write failures:
 
 ```bash
-uv run python -m distengine.verify_runner
+uv run python -m verify_runner
 ```
 
 Also compare runner generation against uncached generation with the pinned
 TinyLlama checkpoint for the three reference prompts:
 
 ```bash
-uv run python -m distengine.verify_runner --checkpoint
+uv run python -m verify_runner --checkpoint
 ```
 
 The checkpoint mode loads model weights and uses the available model device.
@@ -200,7 +214,7 @@ token at a time, and releases its cache and block allocation when finished.
 Run sequential scheduling and failure-cleanup checks with a small CPU model:
 
 ```bash
-uv run python -m distengine.verify_scheduler
+uv run python -m verify_scheduler
 ```
 
 `Scheduler` exclusively controls a fresh runner and block pool. Submit waiting
@@ -210,3 +224,22 @@ release their blocks and enter `finished`. IDs stay reserved for the scheduler's
 lifetime. Requests whose maximum cached history exceeds the pool are rejected.
 Execution failures release resources and propagate; later waiting requests stay
 queued. Failed requests retain their status and are not recorded as finished.
+
+## Engine integration (Stage 10)
+
+```bash
+uv run python -m verify_engine
+uv run python -m verify_engine --checkpoint
+```
+
+The engine is verified on CPU/MPS; NVIDIA GPU execution remains unverified.
+
+```python
+from distengine.engine import LLMEngine
+
+# model is an already loaded custom LlamaForCausalLM on your chosen device.
+engine = LLMEngine(model, num_blocks=32, block_size=16)
+request = engine.add_request("example", [10, 20, 30], 8, eos_token_id=2)
+completed = engine.run_until_complete()
+print(completed[0].generated_token_ids)
+```

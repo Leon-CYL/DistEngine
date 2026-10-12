@@ -4,11 +4,11 @@ from unittest.mock import patch
 import torch
 from transformers import LlamaConfig
 
-from .generation import generate_greedy
-from .models.llama import LlamaForCausalLM
-from .request import Request, RequestStatus
-from .scheduler import Scheduler
-from .verify_runner import make_runner, raises
+from generation import generate_greedy
+from models.llama import LlamaForCausalLM
+from distengine.request import Request, RequestStatus
+from distengine.scheduler import Scheduler
+from verify_runner import make_runner, raises
 
 
 @torch.inference_mode()

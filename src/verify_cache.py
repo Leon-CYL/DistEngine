@@ -1,9 +1,9 @@
 import torch
 from transformers import LlamaConfig
 
-from .paged_kv_cache import PagedKVCache
-from .models.llama import LlamaForCausalLM
-from .generation import generate_greedy, generate_greedy_cached
+from distengine.paged_kv_cache import PagedKVCache
+from models.llama import LlamaForCausalLM
+from generation import generate_greedy, generate_greedy_cached
 
 
 @torch.inference_mode()

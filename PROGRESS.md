@@ -15,7 +15,7 @@ Status: complete.
 
 Status: complete.
 
-- Implemented `src/distengine/hf_reference.py` with prompt, output-length,
+- Implemented `src/hf_reference.py` with prompt, output-length,
   output-path, and revision arguments.
 - Loads `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, applies its chat template, and
   generates greedily using Hugging Face `generate()` with KV caching enabled.
@@ -66,7 +66,7 @@ Status: complete.
 
 Verification:
 
-- The user ran `distengine.request` successfully and reran `distengine.verify`
+- The user ran `distengine.request` successfully and reran `verify`
   after integration; all checks passed, including zero logit differences and
   exact HF token agreement across all three prompts.
 - Additional local checks passed for empty prompts, nonpositive output limits,
@@ -84,7 +84,7 @@ Status: complete.
 - Fixed config typing and read the RoPE base from the installed Transformers
   version's `rope_parameters` dictionary.
 - Scoped the downloaded-model ignore rule to `/models/`, keeping model source
-  files under `src/distengine/models/` available for tracking.
+  files under `src/models/` available for tracking.
 
 The initial user-reported run on October 8, 2026 failed during custom model
 construction because `config.rope_theta` was unavailable. After the config fix,
@@ -92,7 +92,7 @@ the user's October 8 screenshot confirmed successful model construction, strict
 checkpoint loading, and inference for the factual prompt.
 
 Verified from the user's October 8, 2026 terminal output of
-`uv run python -m distengine.verify`, on MPS with float32 and the pinned checkpoint:
+`uv run python -m verify`, on MPS with float32 and the pinned checkpoint:
 
 - Logit shapes and finite-value checks passed.
 - Causal masking passed: appending a token preserved earlier-position logits
@@ -119,7 +119,7 @@ Verified from the user's October 8, 2026 screenshot:
 - Response: “The capital of France is Paris.”
 - Generation stopped at EOS (`2`) after eight tokens, before the output limit.
 
-The user's October 8, 2026 `distengine.verify` run passed all generation checks:
+The user's October 8, 2026 `verify` run passed all generation checks:
 
 - Exact HF token agreement for factual (8 tokens), explanation (32 tokens), and
   sentence-completion (21 tokens) prompts.
@@ -149,7 +149,7 @@ Verification:
   mappings, boundary crossings, partial blocks, overflow, and reset/reuse.
 - Local tiny-model checks passed prefill, decode, chunks, generation agreement,
   length tracking, and cache guards for the paged backend.
-- The user's October 10, 2026 `distengine.verify` run passed on MPS with float32
+- The user's October 10, 2026 `verify` run passed on MPS with float32
   and checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6`.
 - Paged generation exactly matched uncached output for all
   three prompts; the outputs also matched HF (8, 32, and 21 generated tokens).
@@ -172,7 +172,7 @@ Status: complete.
   empty views and prefix-preserving block-table expansion.
 - Cache views must be retired before freeing their blocks; new views start with
   zero valid lengths. Ownership enforcement remains the caller's responsibility.
-- Added `distengine.verify_blocks` and README usage/lifecycle instructions.
+- Added `verify_blocks` and README usage/lifecycle instructions.
 
 Verification on October 10, 2026:
 
@@ -180,7 +180,7 @@ Verification on October 10, 2026:
   growth, atomic exhaustion, and freeing/reuse.
 - Shared CPU storage checks passed interleaved request isolation, cache growth,
   invalid mapping rejection, empty-view growth, reset, and stale-data exclusion.
-- Existing `distengine.verify_cache` tiny-model prefill/decode/generation checks
+- Existing `verify_cache` tiny-model prefill/decode/generation checks
   and `distengine.paged_kv_cache` storage checks passed.
 - The user's full verification run passed on MPS with float32 and checkpoint
   `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Paged generation and cached
@@ -199,17 +199,17 @@ Status: complete.
 - Executes one request per model call using manager-backed shared KV storage.
   Decode grows block mappings as needed and processes the latest generated token;
   the newly sampled token remains uncached until the next step.
-- Added `distengine.verify_runner` assertions for the runner lifecycle,
+- Added `verify_runner` assertions for the runner lifecycle,
   failure handling, and generation agreement, plus optional `--checkpoint`
   verification against the pinned TinyLlama uncached baseline.
 
 Verified from the user's October 11, 2026 screenshot and terminal output:
 
-- `distengine.verify_runner` passed input tensors, positions, validation,
+- `verify_runner` passed input tensors, positions, validation,
   prefill/decode, block growth, interleaved generation agreement, release,
   block reuse, output-limit/EOS stopping, unfinished cleanup, and repeated release.
-- `distengine.verify_blocks` and `distengine.verify_cache` passed.
-- Existing `distengine.verify` regressions passed on MPS with float32 and
+- `verify_blocks` and `verify_cache` passed.
+- Existing `verify` regressions passed on MPS with float32 and
   checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6`: paged generation,
   cached logits, causal masking, repeatability, output-limit stopping, and
   factual EOS stopping. Custom/HF logits had zero maximum and mean error;
@@ -225,7 +225,7 @@ Additional local verification on October 11, 2026:
   affected allocation (including decode growth) and preserved another request
   whose decode subsequently succeeded. All CPU runner checks passed.
 
-- `distengine.verify_runner --checkpoint` passed locally on CPU with float32
+- `verify_runner --checkpoint` passed locally on CPU with float32
   and pinned checkpoint `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Runner
   generation exactly matched the uncached baseline for factual (8 tokens),
   explanation (32 tokens), and sentence-completion (21 tokens) prompts. Cache
@@ -244,7 +244,7 @@ Status: complete for sequential, single-active-request FIFO execution.
   Failed requests leave the running queue, release any remaining cache, and
   propagate the error while preserving later waiting requests. Failed requests
   retain their current status and reserved ID and do not enter finished history.
-- Added `distengine.verify_scheduler`; batching and multiple active requests
+- Added `verify_scheduler`; batching and multiple active requests
   remain outside this stage's scope.
 
 Verified locally on October 11, 2026 with a small CPU model:
@@ -255,7 +255,40 @@ Verified locally on October 11, 2026 with a small CPU model:
   with active caches or zero-block registered requests were rejected.
 - Prefill/decode failures before execution and after partial KV writes released
   resources and allowed the subsequent waiting request to finish correctly.
-- All CPU `distengine.verify_runner` regression checks passed.
+- All CPU `verify_runner` regression checks passed.
+
+## Stage 10 — Engine integration
+
+Status: implemented and verified on CPU/MPS; NVIDIA GPU verification pending.
+
+- Added `LLMEngine` to construct and connect `BlockManager`, shared `KVStorage`,
+  `ModelRunner`, and `Scheduler` on the model's existing device and dtype.
+- Supports request submission, one-operation stepping, pending-work tracking,
+  and running until completion. Each completion call returns only newly finished
+  requests; failures propagate while later queued requests remain available.
+- Added `verify_engine` for integration, output agreement, stopping, repeated use,
+  admission validation, cleanup, and partial-write failure recovery.
+
+Verified from the user's October 11, 2026 terminal output:
+
+- All CPU engine integration checks passed.
+- `verify_engine --checkpoint` passed on MPS with float32 and checkpoint
+  `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Engine outputs exactly matched
+  the uncached baseline for factual (8 tokens), explanation (32 tokens), and
+  sentence-completion (21 tokens) prompts.
+- The roadmap's one-NVIDIA-GPU execution target has not yet been verified.
+
+Source layout updated on October 11, 2026:
+
+- `src/distengine/` contains engine components and package entry points.
+- `src/models/` contains the model architecture; `src/layers/` contains layers.
+- Generation helpers, checkpoint loading, reference/CLI tools, and verification
+  modules live directly under `src/`. Imports and wheel packaging were updated.
+- Run verification as `uv run python -m verify_engine` (likewise for other
+  top-level verification modules).
+- After reorganization, all five CPU verification suites passed: engine,
+  scheduler, runner, blocks, and cache. The package entry point ran; editable
+  installation, wheel/source builds, and wheel contents checks passed.
 
 ## Roadmap
 
@@ -271,7 +304,7 @@ Verified locally on October 11, 2026 with a small CPU model:
 | 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Complete |
 | 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Complete |
 | 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Complete |
-| 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Pending |
+| 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | CPU/MPS verified; NVIDIA GPU pending |
 | 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Pending |
 | 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Pending |
 | 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Pending |

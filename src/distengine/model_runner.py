@@ -1,8 +1,8 @@
 import torch
 
-from .layers.sampler import GreedySampler
+from layers.sampler import GreedySampler
 from .paged_kv_cache import KVStorage, PagedKVCache
-from .models.llama import LlamaForCausalLM
+from models.llama import LlamaForCausalLM
 from .block_manager import BlockManager
 from .request import Request, RequestStatus
 

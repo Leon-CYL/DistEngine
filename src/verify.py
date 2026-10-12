@@ -5,10 +5,10 @@ import gc
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .generation import generate_greedy, generate_greedy_cached
-from .paged_kv_cache import PagedKVCache
-from .hf_reference import choose_device
-from .load_model import MODEL_ID, REVISION, load_model
+from generation import generate_greedy, generate_greedy_cached
+from distengine.paged_kv_cache import PagedKVCache
+from hf_reference import choose_device
+from load_model import MODEL_ID, REVISION, load_model
 
 
 @torch.inference_mode()

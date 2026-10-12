@@ -5,12 +5,12 @@ from unittest.mock import patch
 import torch
 from transformers import LlamaConfig
 
-from .block_manager import BlockManager
-from .generation import generate_greedy
-from .model_runner import ModelRunner
-from .models.llama import LlamaForCausalLM
-from .paged_kv_cache import KVStorage
-from .request import Request
+from distengine.block_manager import BlockManager
+from generation import generate_greedy
+from distengine.model_runner import ModelRunner
+from models.llama import LlamaForCausalLM
+from distengine.paged_kv_cache import KVStorage
+from distengine.request import Request
 
 
 def raises(error_type, operation):
@@ -203,8 +203,8 @@ def check_failures(model):
 @torch.inference_mode()
 def check_checkpoint():
     from transformers import AutoTokenizer
-    from .hf_reference import choose_device
-    from .load_model import MODEL_ID, REVISION, load_model
+    from hf_reference import choose_device
+    from load_model import MODEL_ID, REVISION, load_model
 
     device = choose_device()
     print(f'Runner checkpoint: {REVISION}; device: {device}; dtype: float32', flush=True)

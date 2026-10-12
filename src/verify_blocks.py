@@ -1,8 +1,8 @@
 """CPU-only Stage 7 allocation and shared KV isolation checks."""
 import torch
 
-from .block_manager import BlockManager
-from .paged_kv_cache import KVStorage, PagedKVCache
+from distengine.block_manager import BlockManager
+from distengine.paged_kv_cache import KVStorage, PagedKVCache
 
 
 def raises(error_type, operation):

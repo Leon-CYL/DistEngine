@@ -1,7 +1,7 @@
 import torch
 from transformers import AutoModelForCausalLM, LlamaConfig
 
-from .models.llama import LlamaForCausalLM
+from models.llama import LlamaForCausalLM
 
 
 MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"

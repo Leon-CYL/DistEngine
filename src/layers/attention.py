@@ -3,7 +3,7 @@ from torch import nn
 
 from .linear import Linear
 from .rotary_embedding import RotaryEmbedding
-from ..paged_kv_cache import PagedKVCache
+from distengine.paged_kv_cache import PagedKVCache
 
 
 class Attention(nn.Module):
