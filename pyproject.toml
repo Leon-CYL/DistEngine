@@ -34,3 +34,5 @@ packages = ["src/distengine", "src/models", "src/layers"]
 "src/verify_engine.py" = "verify_engine.py"
 "src/verify_workers.py" = "verify_workers.py"
 "src/verify_ray_workers.py" = "verify_ray_workers.py"
+"src/verify_gpu_workers.py" = "verify_gpu_workers.py"
+"src/verify_transfer.py" = "verify_transfer.py"

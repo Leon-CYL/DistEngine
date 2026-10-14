@@ -263,11 +263,75 @@ environment. After editing a verification module, refresh that copy with
 `uv sync --locked --reinstall-package distengine`, or run its source file directly
 (for example, `uv run python src/verify_ray_workers.py`).
 
-Decode tests use `prepare_local_fixture()` to populate KV inside the decode
-worker. No KV is transferred between actors yet. GPU placement belongs to stage
-12 and KV export/import to stage 13. IDs are unique among active requests and
-can be reused after release. The Ray model factory currently supports only the
-small CPU verification model, not TinyLlama checkpoint execution.
+Stage 11 decode tests use `prepare_local_fixture()` to populate KV inside the
+decode worker and test roles independently. Stages 12 and 13 add GPU placement
+and actual KV handoff. IDs are unique among active requests and can be reused
+after release. CPU tests use the small model; GPU tests also support the pinned
+TinyLlama checkpoint.
+
+## Two-GPU worker placement (Stage 12)
+
+Verified on October 13, 2026 with pinned TinyLlama on two Tesla T4 GPUs: separate
+actor/GPU placement, all three reference-prompt baseline comparisons, and cleanup
+passed. Stage 13 subsequently verified cross-actor handoff too.
+
+```bash
+modal run src/Modal/run_two_gpu.py
+```
+
+This allocates two T4 GPUs in one container, starts a local Ray runtime, and
+reserves one GPU per actor. Each actor sees its assigned GPU as `cuda:0`; the
+verification checks disjoint Ray GPU IDs, separate processes, and model/KV
+placement. It loads the pinned TinyLlama checkpoint in float32 and checks all
+three reference prompts against uncached CUDA generation, then checks full
+release and closing unfinished requests. Model files use the existing Modal
+Hugging Face cache Volume. Two-GPU usage incurs Modal charges.
+
+Successful runs save `results/stage12-placement.json` with placement, environment,
+and token outputs. The file is overwritten only after successful verification.
+Use `--no-checkpoint` for the small deterministic model without downloads, or
+`--output results/stage12-custom.json` to choose the local output path.
+
+On an existing Linux machine with exactly two NVIDIA GPUs, run the source
+directly with `uv run python src/verify_gpu_workers.py --checkpoint`. No GPU
+fallback is allowed. The stage 11 CPU actor defaults remain unchanged.
+
+Decode still prepares KV locally; these checks verify separate-GPU placement and
+independent execution. The roadmap's end-to-end two-GPU output checkpoint is
+verified by stage 13's KV transfer path.
+
+## KV handoff (Stage 13)
+
+Verified on October 13, 2026 with pinned TinyLlama in float32 on two Tesla T4s:
+all three transferred requests matched uncached CUDA generation exactly, with
+block release/reuse and unfinished-request cleanup passing.
+
+```bash
+uv run python src/verify_transfer.py
+modal run src/Modal/run_transfer.py
+```
+
+Prefill exports versioned CPU tensors in logical token order, plus request ID,
+prompt/output IDs, output limit, EOS, cache length, and model/config identity.
+Physical block IDs are not transferred. Decode validates the payload, allocates
+its own blocks, copies each layer into its local device storage, and continues
+from the pending first output token without recomputing the prompt. The source
+releases its blocks only after the destination acknowledges a successful import.
+Requests finishing during prefill complete there without a KV transfer.
+
+This initial implementation uses GPU → CPU → GPU through ordinary Ray object
+transport, not direct device transfer. Imports reject incompatible models,
+versions, metadata, shapes, dtypes, nonfinite KV, and duplicate active IDs. Copy
+failures roll back destination allocation while source KV remains available.
+Inference weights/configuration must remain immutable: pinned checkpoints use
+revision identity; other models cache a fingerprint of their weights and config.
+Retries are explicit, and no durable or exactly-once handoff protocol is claimed.
+
+The Modal runner checks all three pinned TinyLlama reference prompts end to end
+across separate GPUs and saves `results/stage13-transfer.json` after success.
+`--no-checkpoint` selects the small deterministic model. The stage 12 runner
+continues to test independent worker execution; stage 13 enables actual handoff
+in the shared GPU verification module.
 
 ## Engine integration (Stage 10)
 

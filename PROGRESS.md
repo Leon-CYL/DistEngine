@@ -335,8 +335,73 @@ Verified locally on October 13, 2026:
 
 Scope: decode uses a locally prefetched fixture until stage 13 adds KV import.
 No cross-actor KV transfer or separate GPU placement is claimed. Actor model
-construction currently supports the small CPU verification model only. Request
+construction in the original stage 11 tests uses the small CPU model. Stage 12
+adds CUDA and pinned-checkpoint construction. Request
 IDs can be reused after release; only active duplicates are rejected.
+
+## Stage 12 — Separate GPU placement
+
+Status: complete; separate-GPU placement, independent execution, and stage 13
+end-to-end handoff verified.
+
+- Extended typed actors with explicit CPU/CUDA device selection and optional
+  pinned TinyLlama loading. CPU defaults preserve stage 11 verification.
+- CUDA construction requires one Ray GPU reservation and exactly one visible
+  GPU. Readiness checks model and KV placement and reports Ray GPU IDs/node ID.
+- Added `verify_gpu_workers.py` to compare prefill and locally initialized decode
+  with uncached CUDA generation, verify disjoint GPU assignments, release/reuse,
+  and closing unfinished requests. Added it to wheel packaging.
+- Added `src/Modal/run_two_gpu.py`, requesting two T4 GPUs, four CPUs, and 32 GiB
+  of host memory. The default run uses pinned TinyLlama and caches model files;
+  `--no-checkpoint` selects the small model. Successful reports are saved locally.
+- Local ordinary-worker and real CPU Ray checks passed after the changes;
+  invalid-device and missing-GPU-reservation guards and source syntax passed.
+- Modal verification passed on October 13, 2026 with pinned TinyLlama in float32
+  on two Tesla T4 GPUs. Actors had separate PIDs and disjoint Ray GPU IDs, each
+  seeing one `cuda:0`; model parameters and both KV tensors were correctly placed.
+- Prefill first tokens and independent decode outputs matched the uncached CUDA
+  baseline for all three reference prompts. Full release, reuse across prompts,
+  and closing both workers with unfinished requests passed.
+- Saved `results/stage12-placement.json`; successful Modal run:
+  https://modal.com/apps/leonlin0106/main/ap-dJEYHcQHxL1WRwyCFvftmp
+- Wheel build and archive inspection passed for the new verification module.
+
+Stage 13 subsequently verified cross-actor KV transfer and end-to-end output
+agreement, completing the remaining two-GPU checkpoint below.
+
+## Stage 13 — KV transfer
+
+Status: complete; CPU, real Ray CPU, and two-GPU TinyLlama handoff verified.
+
+- Added a versioned CPU snapshot carrying valid logical KV, request metadata,
+  pending first output token, cache length, and model/config identity.
+- Destination import validates compatibility before allocation, constructs its
+  own block mapping, copies all layers, and publishes the request only after
+  successful completion. Partial-copy failures release destination blocks.
+- Source KV remains owned until the driver receives a successful import ACK.
+  Requests already finished in prefill skip transfer. GPU imports synchronize
+  host-to-device copies before acknowledging success.
+- CPU checks passed different block sizes/mappings, exact KV and generation
+  agreement, no prompt recomputation, snapshot isolation, malformed/incompatible
+  payloads, duplicate active IDs, temporary capacity failure/retry, and rollback
+  after a partial-layer copy. Real Ray CPU end-to-end transfer also passed.
+- Existing ordinary worker, engine, runner, scheduler, block and cache checks
+  passed. Added `verify_transfer.py` to wheel packaging.
+- Added `src/Modal/run_transfer.py` for two-T4 pinned TinyLlama handoff, using the
+  existing cache Volume and shared GPU verification code. Results are saved only
+  after success to `results/stage13-transfer.json`.
+- Modal verification passed on October 13, 2026: prefill ran on T4 GPU 0 and
+  decode on T4 GPU 1, using float32 and pinned revision
+  `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Imported-KV decode exactly matched
+  the uncached CUDA baseline for factual (8 tokens, EOS), explanation (32 tokens,
+  length), and sentence-completion (21 tokens, EOS) prompts. Both workers freed
+  all blocks between requests and on close with unfinished work.
+- Saved the successful report in `results/stage13-transfer.json`. Run:
+  https://modal.com/apps/leonlin0106/main/ap-GTagK4GdPMWGC640iOXGh1
+
+Scope: GPU → CPU → GPU snapshots; immutable inference models, explicit retries,
+no durable/exactly-once protocol, direct GPU transport, or later holding-pool
+admission/backpressure policy.
 
 ## Roadmap
 
@@ -354,8 +419,8 @@ IDs can be reused after release; only active duplicates are rejected.
 | 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Complete |
 | 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Complete |
 | 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Complete (local CPU) |
-| 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Pending |
-| 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Pending |
+| 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Complete |
+| 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Complete |
 | 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Pending |
 | 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Pending |
 | 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Pending |

@@ -123,6 +123,13 @@ class _WorkerBase:
     
 
 class PrefillWorker(_WorkerBase):
+    def export_request(self, request_id: str) -> dict:
+        """Keep source ownership until the destination acknowledges import."""
+        from .kv_transfer import export_prefill
+
+        self._ensure_open()
+        return export_prefill(self.runner, self.requests[request_id])
+
     def prefill(
         self,
         request_id: str,
@@ -138,6 +145,17 @@ class PrefillWorker(_WorkerBase):
         )
         
 class DecodeWorker(_WorkerBase):
+    def import_request(self, payload: dict) -> dict:
+        from .kv_transfer import import_prefill
+
+        self._ensure_open()
+        if (isinstance(payload, dict) and isinstance(payload.get("request_id"), str)
+                and payload["request_id"] in self.requests):
+            raise ValueError("Request ID is already active")
+        request = import_prefill(self.runner, payload)
+        self.requests[request.request_id] = request
+        return self._snapshot(request)
+
     def prepare_local_fixture(
         self,
         request_id: str,

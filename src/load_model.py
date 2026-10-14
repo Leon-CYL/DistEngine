@@ -33,5 +33,7 @@ def load_model(
 
     model = model.to(device)
     model.eval()
+    # Transfer compatibility assumes these inference weights stay immutable.
+    model._checkpoint_identity = f"{MODEL_ID}@{REVISION}"
 
     return model
