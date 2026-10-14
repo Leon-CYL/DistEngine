@@ -22,7 +22,8 @@ are immediately available to `uv run`; activating the environment is optional.
 PyTorch provides tensor/model execution and Transformers provides the Hugging Face
 TinyLlama reference for the next stages. No model weights are downloaded at stage 0.
 Later GPU stages target Linux with NVIDIA GPUs; the setup command can run on macOS.
-Ray and Modal will be added when their stages are implemented.
+Ray is included for local worker orchestration. The Modal CLI is installed
+separately for the GPU verification commands below.
 
 ## Run the TinyLlama reference
 
@@ -131,7 +132,9 @@ DistEngine/
     │   ├── model_runner.py
     │   ├── block_manager.py
     │   ├── paged_kv_cache.py
-    │   └── request.py
+    │   ├── request.py
+    │   ├── workers.py
+    │   └── ray_workers.py
     ├── models/
     │   ├── __init__.py
     │   └── llama.py
@@ -153,7 +156,9 @@ DistEngine/
     ├── verify_cache.py
     ├── verify_runner.py
     ├── verify_scheduler.py
-    └── verify_engine.py
+    ├── verify_engine.py
+    ├── verify_workers.py
+    └── verify_ray_workers.py
 ```
 
 Stage 0 provides the package scaffold and setup command. Stage 1 adds a Hugging
@@ -161,7 +166,9 @@ Face TinyLlama reference with saved token outputs. Stage 2 documents the archite
 stages 3–6 implement requests, the custom model, manual generation, and paged
 KV caching, with correctness verification complete. Stages 7–9 add block management,
 the model runner, and FIFO scheduling. Stage 10 engine integration is verified on
-CPU/MPS; NVIDIA GPU execution remains pending.
+CPU/MPS and one NVIDIA Tesla T4 through Modal. Stage 10 is complete.
+Stage 11 adds ordinary prefill/decode workers and thin Ray actors, verified with
+a deterministic small CPU model in separate local processes.
 
 ## Block manager and shared KV storage (Stage 7)
 
@@ -225,6 +232,43 @@ lifetime. Requests whose maximum cached history exceeds the pool are rejected.
 Execution failures release resources and propagate; later waiting requests stay
 queued. Failed requests retain their status and are not recorded as finished.
 
+## Worker roles and local Ray orchestration (Stage 11)
+
+```bash
+uv run python -m verify_workers
+uv run python -m verify_ray_workers
+```
+
+`PrefillWorker` and `DecodeWorker` own independent model runners, request state,
+block pools, and KV storage. Ray actors construct a deterministic small CPU model
+inside their processes and delegate operations to these ordinary workers.
+`ready()` reports role, PID, device, active IDs, and free blocks. `close()` releases
+unfinished requests; the driver then terminates actors and shuts down Ray.
+Automatic actor restarts and method retries are disabled to avoid replaying
+state-changing inference calls without a recovery protocol.
+
+The ordinary checks cover output agreement, immediate EOS, one-token limits,
+invalid/duplicate requests, snapshot isolation, capacity exhaustion and retry,
+partial-write failure cleanup, surviving requests, and close behavior. The Ray
+checks cover process isolation, dispatch, output agreement, remote exceptions,
+actor survival, and unfinished-request cleanup.
+
+The local Ray verification reuses the driver's Python environment and disables
+automatic `uv run` environment replication before importing Ray. This avoids
+recreating dependencies in each temporary Ray session. It also verifies that
+both actors use the driver's Python executable. This setup assumes all actors
+run on the same machine; remote nodes will need their own dependency setup.
+Standalone modules included through wheel `force-include` are copied into the
+environment. After editing a verification module, refresh that copy with
+`uv sync --locked --reinstall-package distengine`, or run its source file directly
+(for example, `uv run python src/verify_ray_workers.py`).
+
+Decode tests use `prepare_local_fixture()` to populate KV inside the decode
+worker. No KV is transferred between actors yet. GPU placement belongs to stage
+12 and KV export/import to stage 13. IDs are unique among active requests and
+can be reused after release. The Ray model factory currently supports only the
+small CPU verification model, not TinyLlama checkpoint execution.
+
 ## Engine integration (Stage 10)
 
 ```bash
@@ -232,7 +276,39 @@ uv run python -m verify_engine
 uv run python -m verify_engine --checkpoint
 ```
 
-The engine is verified on CPU/MPS; NVIDIA GPU execution remains unverified.
+The engine is verified on CPU/MPS and one NVIDIA Tesla T4 through Modal, using
+float32 and the pinned TinyLlama checkpoint. All three CUDA reference-prompt
+outputs exactly matched uncached generation; resource release and engine reuse
+also passed.
+
+Run stage 10 on one NVIDIA T4 through Modal from the project root:
+
+```bash
+uv tool install 'modal>=1.1'
+modal setup
+modal run src/Modal/run_engine.py
+```
+
+The runner uses the existing `uv.lock` for remote dependencies, uploads `src/`,
+and caches the pinned TinyLlama weights in a Modal Volume. It requires exactly
+one visible CUDA GPU and retains float32. It runs the CPU integration suite,
+checks CUDA engine outputs against uncached generation for all three reference
+prompts, and verifies block release and engine reuse. GPU output is printed and
+saved locally to `results/stage10-modal.json` only after all checks pass.
+The first run builds the image and downloads weights. Modal GPU runs incur
+usage charges under your account.
+
+To add a custom prompt and choose an output file:
+
+```bash
+modal run src/Modal/run_engine.py --prompt "Explain paged KV caching." \
+  --max-new-tokens 32 --output results/stage10-custom.json
+```
+
+Reference prompts use a 32-token limit unless they are the selected prompt.
+The output file is overwritten on a successful run. Stage 10's GPU checkpoint
+passed on October 12, 2026; this single-GPU helper does not implement the later
+two-GPU deployment stage.
 
 ```python
 from distengine.engine import LLMEngine

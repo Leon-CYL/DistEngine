@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "huggingface-hub>=1.33.0",
+    "ray>=2.59.0",
     "torch>=2.14.1",
     "transformers>=5.19.0",
 ]
@@ -31,3 +32,5 @@ packages = ["src/distengine", "src/models", "src/layers"]
 "src/verify_runner.py" = "verify_runner.py"
 "src/verify_scheduler.py" = "verify_scheduler.py"
 "src/verify_engine.py" = "verify_engine.py"
+"src/verify_workers.py" = "verify_workers.py"
+"src/verify_ray_workers.py" = "verify_ray_workers.py"

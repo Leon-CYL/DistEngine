@@ -259,7 +259,7 @@ Verified locally on October 11, 2026 with a small CPU model:
 
 ## Stage 10 — Engine integration
 
-Status: implemented and verified on CPU/MPS; NVIDIA GPU verification pending.
+Status: complete; verified on CPU/MPS and one NVIDIA GPU.
 
 - Added `LLMEngine` to construct and connect `BlockManager`, shared `KVStorage`,
   `ModelRunner`, and `Scheduler` on the model's existing device and dtype.
@@ -276,7 +276,26 @@ Verified from the user's October 11, 2026 terminal output:
   `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. Engine outputs exactly matched
   the uncached baseline for factual (8 tokens), explanation (32 tokens), and
   sentence-completion (21 tokens) prompts.
-- The roadmap's one-NVIDIA-GPU execution target has not yet been verified.
+
+Added `src/Modal/run_engine.py` for the single-GPU checkpoint. It requests
+one Modal T4, uses locked dependencies and a persistent Hugging Face cache,
+and checks float32 CUDA engine generation against the uncached baseline for
+the three reference prompts, including resource release and repeated engine
+use. Successful runs save GPU/environment metadata and outputs locally to
+`results/stage10-modal.json`. See the README for setup and run commands.
+
+Verified from the user's successful Modal run and saved
+`results/stage10-modal.json` on October 12, 2026:
+
+- One Tesla T4 on `cuda:0`, float32, Python 3.11.12, PyTorch 2.14.1+cu130,
+  Transformers 5.19.0, and the pinned checkpoint above.
+- CPU integration checks passed in the remote environment.
+- CUDA engine outputs exactly matched uncached generation for factual
+  (8 tokens, EOS), explanation (32 tokens, length limit), and sentence-completion
+  (21 tokens, EOS) prompts.
+- Shared KV storage placement, full block release, empty-engine behavior, and
+  repeated engine use passed. The Modal app completed successfully.
+- Run: https://modal.com/apps/leonlin0106/main/ap-xEu5D5nlAB4SqwbT2zZaBB
 
 Source layout updated on October 11, 2026:
 
@@ -289,6 +308,35 @@ Source layout updated on October 11, 2026:
 - After reorganization, all five CPU verification suites passed: engine,
   scheduler, runner, blocks, and cache. The package entry point ran; editable
   installation, wheel/source builds, and wheel contents checks passed.
+
+## Stage 11 — Worker roles and Ray orchestration
+
+Status: complete for local CPU actor lifecycle and request dispatch.
+
+- Added ordinary `PrefillWorker` and `DecodeWorker` with independent runner/KV
+  ownership, copied request snapshots, explicit release, and idempotent close.
+- Added thin typed Ray actors that construct a deterministic small model inside
+  their own processes. Actors reserve one CPU each; automatic restarts and task
+  retries are disabled. Ray is included in the dependency lockfile.
+- Added both verification modules to wheel packaging.
+
+Verified locally on October 13, 2026:
+
+- Ordinary worker checks passed prefill/decode baseline agreement, immediate EOS,
+  one-token limits, invalid and duplicate active IDs, snapshot isolation, close
+  behavior, capacity exhaustion with state-preserving retry, and partial KV-write
+  failure cleanup while another request survives and finishes correctly.
+- Real Ray actor checks passed separate process IDs, dispatch, baseline agreement,
+  remote exception propagation, actor survival, block release, and closing with
+  unfinished work. The driver terminated actors and shut down its local runtime.
+- CPU engine, runner, scheduler, block-manager, and cache regressions all passed.
+- Wheel build passed; inspected the archive to confirm both worker modules and
+  both verification modules are included.
+
+Scope: decode uses a locally prefetched fixture until stage 13 adds KV import.
+No cross-actor KV transfer or separate GPU placement is claimed. Actor model
+construction currently supports the small CPU verification model only. Request
+IDs can be reused after release; only active duplicates are rejected.
 
 ## Roadmap
 
@@ -304,8 +352,8 @@ Source layout updated on October 11, 2026:
 | 7 | Block manager | Allocation, freeing, reuse, and available-block tracking. | Complete |
 | 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Complete |
 | 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Complete |
-| 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | CPU/MPS verified; NVIDIA GPU pending |
-| 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Pending |
+| 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Complete |
+| 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Complete (local CPU) |
 | 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Pending |
 | 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Pending |
 | 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Pending |
