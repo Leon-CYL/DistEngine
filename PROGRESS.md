@@ -403,6 +403,43 @@ Scope: GPU → CPU → GPU snapshots; immutable inference models, explicit retri
 no durable/exactly-once protocol, direct GPU transport, or later holding-pool
 admission/backpressure policy.
 
+## Stage 14 — Prefill KV holding pool
+
+Status: complete for the current CPU implementation; real Ray CPU transfer
+regression verified.
+
+- Added `PrefillHoldingPool` as a bounded FIFO collection of request IDs with
+  capacity validation, duplicate rejection, non-destructive peek, removal,
+  length, and copied ID snapshots. Request objects and KV remain owned by the
+  prefill worker and runner; the pool does not store extra CPU KV snapshots.
+- Integrated the pool into `PrefillWorker`: full pools reject admission before
+  model execution, and only successful unfinished prefills enter the pool.
+  Immediate EOS and one-token-limit completions do not occupy holding slots.
+- Export retains held source KV until explicit release after successful import.
+  Release and idempotent close remove held entries and free KV blocks. Failed
+  prefill does not leave held entries; failed import preserves source ownership.
+- Updated worker and transfer verification constructors and supplied a separate
+  holding pool when constructing the Ray prefill worker.
+- Added `verify_holding_pool.py` and included it in wheel packaging.
+
+Verified from the user's October 17, 2026 macOS terminal output:
+
+- `PYTHONPATH=src uv run python -m verify_holding_pool` passed pool validation,
+  FIFO ordering, bounds, rejection atomicity, copied snapshots, ID reuse,
+  immediate completion, partial-prefill failure cleanup, bounded admission,
+  handoff retry, generation continuation, and resource cleanup.
+- `PYTHONPATH=src uv run python -m verify_workers` passed all ordinary worker
+  checks, including baseline agreement, stopping, validation, capacity retry,
+  partial-write failure recovery, block release, and close.
+- `PYTHONPATH=src uv run python -m verify_transfer` passed local CPU handoff,
+  remapping, no prompt recomputation, isolation, validation, retry, rollback,
+  and real Ray CPU payload handoff, continuation, and cleanup.
+
+Scope: holding capacity is a request-count limit; physical KV capacity remains
+enforced by the block manager. Operations assume serial worker execution.
+Stage 14 GPU verification has not been run. Decode-pull admission remains stage
+15; upstream queuing and coordinated backpressure remain stage 16.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
@@ -421,7 +458,7 @@ admission/backpressure policy.
 | 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Complete (local CPU) |
 | 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Complete |
 | 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Complete |
-| 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Pending |
+| 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Complete (CPU) |
 | 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Pending |
 | 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Pending |
 | 17 | Multiple prefill workers | Independent prefill workers and request queues. | Pending |

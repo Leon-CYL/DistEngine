@@ -5,6 +5,7 @@ import torch
 from transformers import LlamaConfig
 
 from distengine.workers import PrefillWorker, DecodeWorker
+from distengine.holding_pool import PrefillHoldingPool
 from models.llama import LlamaForCausalLM
 
 
@@ -76,7 +77,7 @@ class PrefillActorImpl:
         checkpoint: bool = False,
     ):
         model = build_worker_model(seed, device, checkpoint)
-        self.worker = PrefillWorker(model, num_blocks, block_size)
+        self.worker = PrefillWorker(model, num_blocks, block_size, holding_pool=PrefillHoldingPool(max_held_requests=4))
 
     @ray.method
     def ready(self) -> dict:

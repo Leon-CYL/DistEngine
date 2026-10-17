@@ -4,6 +4,7 @@ import sys
 from distengine.engine import LLMEngine
 from distengine.request import Request
 from models.llama import LlamaForCausalLM
+from distengine.holding_pool import PrefillHoldingPool
 
 
 class _WorkerBase:
@@ -123,6 +124,10 @@ class _WorkerBase:
     
 
 class PrefillWorker(_WorkerBase):
+    def __init__(self, model: LlamaForCausalLM, num_blocks: int, block_size: int, holding_pool: PrefillHoldingPool):
+        super().__init__(model, num_blocks, block_size)
+        self.prefill_pool = holding_pool
+    
     def export_request(self, request_id: str) -> dict:
         """Keep source ownership until the destination acknowledges import."""
         from .kv_transfer import export_prefill
@@ -137,12 +142,30 @@ class PrefillWorker(_WorkerBase):
         max_new_tokens: int,
         eos_token_id: int,
     ) -> dict:
-        return self._start_local(
+        self._ensure_open()
+
+        if self.prefill_pool.is_full():
+            raise RuntimeError("Prefill holding pool is full")
+
+        result = self._start_local(
             request_id,
             prompt_token_ids,
             max_new_tokens,
             eos_token_id,
         )
+
+        if result["status"] != "FINISHED":
+            self.prefill_pool.add(request_id)
+
+        return result
+    
+    def release(self, request_id: str) -> dict:
+        result = super().release(request_id)
+
+        if request_id in self.prefill_pool.request_ids():
+            self.prefill_pool.remove(request_id)
+
+        return result
         
 class DecodeWorker(_WorkerBase):
     def import_request(self, payload: dict) -> dict:

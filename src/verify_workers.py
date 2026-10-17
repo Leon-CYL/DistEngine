@@ -3,12 +3,15 @@ from unittest.mock import patch
 from transformers import LlamaConfig
 
 from distengine.workers import PrefillWorker, DecodeWorker
+from distengine.holding_pool import PrefillHoldingPool
 from generation import generate_greedy
 from models.llama import LlamaForCausalLM
 from verify_runner import raises
 
 
 def check_empty(worker):
+    if isinstance(worker, PrefillWorker):
+        assert len(worker.prefill_pool) == 0
     assert not worker.requests
     assert not worker.runner.caches
     assert not worker.runner.block_manager.request_blocks
@@ -18,7 +21,8 @@ def check_empty(worker):
 def check_boundaries():
     # Both role entry points can finish immediately during local prefill.
     for cls in (PrefillWorker, DecodeWorker):
-        worker = cls(make_model(), 2, 4)
+        worker = (PrefillWorker(make_model(), 2, 4, PrefillHoldingPool(4))
+                  if cls is PrefillWorker else DecodeWorker(make_model(), 2, 4))
         start = worker.prefill if cls is PrefillWorker else worker.prepare_local_fixture
         try:
             first = start("one", [10, 20, 30], 1, -1)
@@ -150,7 +154,8 @@ def main():
         eos,
     )[0].tolist()
 
-    prefill = PrefillWorker(make_model(), num_blocks=8, block_size=4)
+    prefill = PrefillWorker(make_model(), num_blocks=8, block_size=4,
+                            holding_pool=PrefillHoldingPool(4))
     decode = DecodeWorker(make_model(), num_blocks=8, block_size=4)
 
     try:

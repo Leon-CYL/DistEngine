@@ -12,6 +12,7 @@ from ray.actor import ActorHandle
 import torch
 
 from distengine.paged_kv_cache import PagedKVCache
+from distengine.holding_pool import PrefillHoldingPool
 from distengine.ray_workers import PrefillActor, DecodeActor, build_test_model
 from distengine.workers import PrefillWorker, DecodeWorker
 from generation import generate_greedy
@@ -32,7 +33,7 @@ def finish(worker, request_id):
 
 def check_local():
     torch.set_num_threads(1)
-    source = PrefillWorker(build_test_model(0), 8, 4)
+    source = PrefillWorker(build_test_model(0), 8, 4, PrefillHoldingPool(4))
     # Different block sizes and occupied blocks force independent destination maps.
     target = DecodeWorker(build_test_model(0), 16, 2)
     try:
