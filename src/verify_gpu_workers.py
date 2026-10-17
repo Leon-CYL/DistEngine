@@ -42,7 +42,10 @@ def check_released(info):
 
 
 @torch.inference_mode()
-def main(checkpoint: bool = False, transfer: bool = False) -> dict:
+def main(checkpoint: bool = False, transfer: bool = False, admission: bool = False) -> dict:
+    if admission:
+        transfer = True
+    from distengine.admission import pull_one_ray
     if ray.is_initialized():
         raise RuntimeError("Run this verification with a fresh Ray runtime")
     if not torch.cuda.is_available() or torch.cuda.device_count() != 2:
@@ -102,6 +105,7 @@ def main(checkpoint: bool = False, transfer: bool = False) -> dict:
         print("PASS: separate processes and GPUs; model and KV placement", flush=True)
 
         results = []
+        admission_count = 0
         for index, (text, ids, baseline) in enumerate(zip(prompts, inputs, expected)):
             request_id = f"request-{index}"
             first = ray.get(prefill.prefill.remote(request_id, ids, limit, eos), timeout=180)
@@ -109,10 +113,35 @@ def main(checkpoint: bool = False, transfer: bool = False) -> dict:
                 if first["status"] == "FINISHED":
                     result = first
                 else:
-                    payload_ref = prefill.export_request.remote(request_id)
-                    result = ray.get(decode.import_request.remote(payload_ref), timeout=180)
-                    # ACK: destination has copied every layer. Only now free source KV.
-                    ray.get(prefill.release.remote(request_id), timeout=30)
+                    if admission:
+                        descriptor = ray.get(prefill.peek_ready.remote(), timeout=30)
+                        assert descriptor == {"request_id": request_id,
+                                              "num_prompt_tokens": len(ids),
+                                              "max_new_tokens": limit}
+                        required = (len(ids) + limit - 1 + block_size - 1) // block_size
+                        # Occupy enough blocks that the FIFO head cannot fit.
+                        occupied_tokens = (num_blocks - required) * block_size + 1
+                        ray.get(decode.prepare_local_fixture.remote(
+                            "occupied", [ids[0]] * occupied_tokens, 2, -1), timeout=180)
+                        before_source, before_target = ray.get(
+                            [prefill.ready.remote(), decode.ready.remote()], timeout=30)
+                        assert pull_one_ray(prefill, decode) is None
+                        after_source, after_target = ray.get(
+                            [prefill.ready.remote(), decode.ready.remote()], timeout=30)
+                        assert before_source == after_source and before_target == after_target
+                        assert ray.get(prefill.peek_ready.remote(), timeout=30) == descriptor
+                        ray.get(decode.release.remote("occupied"), timeout=30)
+                        result = pull_one_ray(prefill, decode)
+                        assert result is not None and result["request_id"] == request_id
+                        assert ray.get(prefill.peek_ready.remote(), timeout=30) is None
+                        reserved = ray.get(decode.ready.remote(), timeout=30)
+                        assert reserved["num_free_blocks"] == num_blocks - required
+                        admission_count += 1
+                    else:
+                        payload_ref = prefill.export_request.remote(request_id)
+                        result = ray.get(decode.import_request.remote(payload_ref), timeout=180)
+                        # ACK: destination copied every layer before source release.
+                        ray.get(prefill.release.remote(request_id), timeout=30)
             else:
                 # Stage 12 keeps its independent execution check.
                 result = ray.get(decode.prepare_local_fixture.remote(
@@ -122,28 +151,37 @@ def main(checkpoint: bool = False, transfer: bool = False) -> dict:
             assert first["generated_token_ids"] == baseline[len(ids):len(ids) + 1]
             while result["status"] != "FINISHED":
                 result = ray.get(decode.step.remote(request_id), timeout=180)
+                if admission and result["status"] != "FINISHED":
+                    current = ray.get(decode.ready.remote(), timeout=30)
+                    assert current["num_free_blocks"] == num_blocks - required
             assert result["prompt_token_ids"] + result["generated_token_ids"] == baseline
             for info in ray.get([actor.ready.remote() for actor in actors], timeout=30):
                 check_released(info)
             results.append({"prompt": text, **result})
-            mode = "end-to-end KV handoff" if transfer else "independent prefill/decode"
+            mode = ("decode-pull denial/retry and reserved handoff" if admission else
+                    "end-to-end KV handoff" if transfer else "independent prefill/decode")
             print(f"PASS: GPU {mode}, baseline agreement and release: {text}", flush=True)
 
         # Both roles must release unfinished work when closed.
         ray.get(prefill.prefill.remote("unfinished", inputs[0], limit, -1), timeout=180)
         if transfer:
             payload_ref = prefill.export_request.remote("unfinished")
-            ray.get(decode.import_request.remote(payload_ref), timeout=180)
+            ray.get(decode.import_request.remote(payload_ref, reserve_full=admission), timeout=180)
         else:
             ray.get(decode.prepare_local_fixture.remote("unfinished", inputs[0], limit, -1), timeout=180)
         ray.get([actor.close.remote() for actor in actors], timeout=30)
         for info in ray.get([actor.ready.remote() for actor in actors], timeout=30):
             assert info["closed"]
             check_released(info)
+        if admission:
+            assert admission_count > 0, "No unfinished request exercised decode-pull admission"
         print("PASS: GPU worker close releases unfinished requests", flush=True)
         return {
-            "stage": 13 if transfer else 12,
-            "status": "end-to-end-transfer-passed" if transfer else "placement-and-independent-execution-passed",
+            "stage": 15 if admission else 13 if transfer else 12,
+            "status": ("decode-pull-admission-passed" if admission else
+                       "end-to-end-transfer-passed" if transfer else "placement-and-independent-execution-passed"),
+            "decode_pull_verified": admission,
+            "admitted_requests": admission_count,
             "kv_transfer_verified": transfer, "checkpoint": checkpoint,
             "model": model_id, "revision": revision,
             "python": platform.python_version(), "torch": torch.__version__,

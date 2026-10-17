@@ -121,21 +121,38 @@ def check_local():
 
 
 def check_ray():
+    from distengine.admission import pull_one_ray
     ray.init(address="local", num_cpus=2, include_dashboard=False,
              runtime_env={"py_executable": sys.executable})
     actors = []
     try:
         source = PrefillActor.remote()
         actors.append(source)
-        target = DecodeActor.remote()
+        target = DecodeActor.remote(num_blocks=2)
         actors.append(target)
         ray.get([source.ready.remote(), target.ready.remote()], timeout=60)
+        assert pull_one_ray(source, target) is None
         prompt = [10, 20, 30, 40, 50]
         first = ray.get(source.prefill.remote("ray-handoff", prompt, 4, -1), timeout=30)
         assert first["status"] == "RUNNING"
-        payload_ref = source.export_request.remote("ray-handoff")
-        result = ray.get(target.import_request.remote(payload_ref), timeout=30)
-        ray.get(source.release.remote("ray-handoff"), timeout=30)
+        descriptor = ray.get(source.peek_ready.remote(), timeout=30)
+        assert descriptor == {"request_id": "ray-handoff", "num_prompt_tokens": 5,
+                              "max_new_tokens": 4}
+        assert ray.get(target.can_admit.remote(5, 4), timeout=30) is True
+        ray.get(target.prepare_local_fixture.remote("occupied", [10], 2, -1), timeout=30)
+        before_source = ray.get(source.ready.remote(), timeout=30)
+        before_target = ray.get(target.ready.remote(), timeout=30)
+        assert pull_one_ray(source, target) is None
+        assert ray.get(source.ready.remote(), timeout=30) == before_source
+        assert ray.get(target.ready.remote(), timeout=30) == before_target
+        assert ray.get(source.peek_ready.remote(), timeout=30) == descriptor
+        ray.get(target.release.remote("occupied"), timeout=30)
+        before = ray.get(target.ready.remote(), timeout=30)
+        result = pull_one_ray(source, target)
+        assert result["request_id"] == "ray-handoff"
+        reserved = ray.get(target.ready.remote(), timeout=30)
+        assert reserved["num_free_blocks"] == before["num_free_blocks"] - 2
+        assert ray.get(source.peek_ready.remote(), timeout=30) is None
         while result["status"] != "FINISHED":
             result = ray.get(target.step.remote("ray-handoff"), timeout=30)
         model = build_test_model(0)
@@ -144,7 +161,8 @@ def check_ray():
         for info in ray.get([actor.ready.remote() for actor in actors], timeout=30):
             assert not info["active_request_ids"]
             assert info["num_free_blocks"] == info["num_blocks"]
-        print("PASS: real Ray CPU payload handoff, continuation and cleanup")
+        assert pull_one_ray(source, target) is None
+        print("PASS: real Ray CPU pull denial, capacity retry, reserved handoff, continuation and cleanup")
     finally:
         for actor in actors:
             try:

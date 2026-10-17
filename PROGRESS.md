@@ -311,7 +311,8 @@ Source layout updated on October 11, 2026:
 
 ## Stage 11 — Worker roles and Ray orchestration
 
-Status: complete for local CPU actor lifecycle and request dispatch.
+Status: complete; initially verified on local CPU, with worker roles and Ray
+orchestration subsequently verified on separate GPUs in stages 12–15.
 
 - Added ordinary `PrefillWorker` and `DecodeWorker` with independent runner/KV
   ownership, copied request snapshots, explicit release, and idempotent close.
@@ -333,11 +334,12 @@ Verified locally on October 13, 2026:
 - Wheel build passed; inspected the archive to confirm both worker modules and
   both verification modules are included.
 
-Scope: decode uses a locally prefetched fixture until stage 13 adds KV import.
-No cross-actor KV transfer or separate GPU placement is claimed. Actor model
-construction in the original stage 11 tests uses the small CPU model. Stage 12
-adds CUDA and pinned-checkpoint construction. Request
-IDs can be reused after release; only active duplicates are rejected.
+Original stage 11 scope: decode used a locally prefetched fixture, and actor
+construction used the small CPU model. Stage 12 subsequently verified separate
+GPU placement and pinned-checkpoint execution; stages 13–15 verified cross-actor
+KV handoff and decode-pull admission on two T4 GPUs, including pinned TinyLlama
+baseline agreement and cleanup. See those stages for GPU verification evidence.
+Request IDs can be reused after release; only active duplicates are rejected.
 
 ## Stage 12 — Separate GPU placement
 
@@ -405,8 +407,8 @@ admission/backpressure policy.
 
 ## Stage 14 — Prefill KV holding pool
 
-Status: complete for the current CPU implementation; real Ray CPU transfer
-regression verified.
+Status: complete; CPU lifecycle checks and two-GPU holding/admission handoff
+verified.
 
 - Added `PrefillHoldingPool` as a bounded FIFO collection of request IDs with
   capacity validation, duplicate rejection, non-destructive peek, removal,
@@ -437,8 +439,70 @@ Verified from the user's October 17, 2026 macOS terminal output:
 
 Scope: holding capacity is a request-count limit; physical KV capacity remains
 enforced by the block manager. Operations assume serial worker execution.
-Stage 14 GPU verification has not been run. Decode-pull admission remains stage
-15; upstream queuing and coordinated backpressure remain stage 16.
+The stage 15 Modal run verified retained source ownership during denied GPU
+admission, successful handoff, and cleanup on two T4 GPUs. Stage 15 adds
+decode-pull admission; upstream queuing and coordinated backpressure remain stage 16.
+
+## Stage 15 — Decode-pull admission
+
+Status: complete; CPU, real Ray CPU, and two-GPU pinned TinyLlama admission verified.
+
+- Added non-destructive `peek_ready()` metadata inspection on the prefill worker
+  and actor, avoiding KV export before a decode capacity decision.
+- Added `DecodeWorker.can_admit()` and its Ray wrapper. Queries validate metadata,
+  reject requests exceeding total pool capacity, and return false for temporary
+  free-block shortages without reserving or changing state.
+- Added opt-in `reserve_full=True` import through the worker and actor layers.
+  Import reserves blocks for prompt length plus maximum output length minus one,
+  while valid KV length remains the prompt length. Default imports retain their
+  previous prompt-only allocation behavior. Partial-copy failure frees the full
+  reservation before propagating the error.
+- Added serial `pull_one()` and `pull_one_ray()` coordinators: peek the FIFO head,
+  check destination capacity, export only when admissible, import with full
+  reservation, and release source ownership only after successful import.
+- Extended `verify_admission.py` with coordinator checks and updated the real Ray
+  transfer check to exercise denied admission, capacity release, retry, and
+  reserved handoff. Added explicit Ray object-reference types for editor inference.
+
+Verified from the user's October 17, 2026 macOS terminal output:
+
+- `PYTHONPATH=src uv run python -m verify_admission` passed metadata/FIFO checks,
+  validation, capacity rounding, read-only queries, full reservation, stale-query
+  rejection, copy-failure rollback, exact KV preservation, fixed block mappings,
+  baseline generation agreement, denial without export, retry, and release-failure
+  propagation.
+- `PYTHONPATH=src uv run python -m verify_transfer` passed local CPU handoff
+  regressions and real Ray CPU pull denial, capacity retry, reserved handoff,
+  generation continuation, and cleanup.
+- Ray reported the filesystem containing its session directory was over 95% full;
+  the verification completed successfully despite the warning.
+
+Verified on Modal on October 17, 2026 from the user's successful terminal output
+and `results/stage15-admission.json`:
+
+- Both the deterministic small-model run (`--no-checkpoint`) and the default
+  pinned TinyLlama run completed successfully on two Tesla T4 GPUs.
+- Prefill and decode ran in separate processes on disjoint Ray GPU IDs 0 and 1;
+  each actor saw one `cuda:0`, with model and KV storage correctly placed.
+- TinyLlama used float32, revision `fe8a4ea1ffedaf415f4da2f062534de366a451e6`,
+  Python 3.11.12, PyTorch 2.14.1+cu130, and Ray 2.59.0.
+- Actual decode-pull orchestration passed capacity denial with retained source
+  ownership, retry after capacity release, full destination reservation, and
+  unchanged reserved block counts during unfinished decode.
+- All three reference prompts exactly matched uncached CUDA generation: factual
+  (8 tokens, EOS), explanation (32 tokens, length), and sentence completion
+  (21 tokens, EOS). Full block release between requests and close with unfinished
+  work passed. CPU admission regression checks also passed in the remote image.
+- The saved report contains the pinned TinyLlama run; it replaced the small-model
+  report at the same default path.
+- Small-model run: https://modal.com/apps/leonlin0106/main/ap-W3LhtoEGLiwKMC8xnYVtUG
+- TinyLlama run: https://modal.com/apps/leonlin0106/main/ap-ZTC6Ccpfk98BmrAcrEXpcu
+
+Scope: one serial coordinator per source, FIFO admission, explicit retries, and
+immutable models. Source-release failure after successful import is surfaced;
+automatic recovery and durable/exactly-once handoff are not implemented. All
+production decode admissions must use full reservation to retain the guarantee
+that admitted requests can finish without competing for future KV blocks.
 
 ## Roadmap
 
@@ -455,11 +519,11 @@ Stage 14 GPU verification has not been run. Decode-pull admission remains stage
 | 8 | Model runner | Prepare inputs, positions, and KV information; execute prefill/decode. | Complete |
 | 9 | Basic scheduler | FIFO waiting/running/finished queues; no new continuous-batching research. | Complete |
 | 10 | nano-vLLM-style engine | Connect LLMEngine, Scheduler, ModelRunner, and BlockManager on one GPU. | Complete |
-| 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Complete (local CPU) |
+| 11 | Prefill/decode roles + Ray orchestration | Implement PrefillWorker and DecodeWorker as thin Ray actors; start with a local Ray runtime, actor lifecycle, and request dispatch; keep model execution in ordinary Python classes. | Complete |
 | 12 | Two-GPU DistEngine | Place prefill and decode actors on separate GPUs with explicit Ray resource reservations; verify placement and execution, using the stage 13 transfer path for end-to-end output correctness. | Complete |
 | 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Complete |
-| 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Complete (CPU) |
-| 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Pending |
+| 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Complete |
+| 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Complete |
 | 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Pending |
 | 17 | Multiple prefill workers | Independent prefill workers and request queues. | Pending |
 | 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Pending |
@@ -470,6 +534,19 @@ Stage 14 GPU verification has not been run. Decode-pull admission remains stage
 | 23 | Modal deployment | Start with one prefill GPU and one decode GPU; scale as necessary. | Pending |
 | 24 | Final benchmark | Repeat the controlled stealing-disabled/enabled comparison on the final system; analyze performance and correctness against the saved baseline. | Pending |
 | 25 | Cleanup + report | Simplify code; document architecture, results, limitations, and RDMA/FlashInfer/TP future work. | Pending |
+
+## GPU correctness checkpoints
+
+- Stages 14–15 two-GPU checkpoint completed on October 17, 2026 using
+  `uv run modal run src/Modal/run_admission.py`. Actual pull orchestration,
+  pinned TinyLlama output agreement, capacity denial/retry, full reservation,
+  source retention, and cleanup passed; report: `results/stage15-admission.json`.
+- After stage 16, verify holding-pool saturation, upstream waiting, and resumed
+  admission as decode releases capacity on the two-GPU system.
+- After stage 17, verify multiple prefill GPUs and request isolation before GPU
+  baseline measurements at stage 20. Repeat correctness checks after scheduling
+  changes in stage 21 and decode-worker expansion in stage 22, and before the
+  final stage 24 benchmark.
 
 ## Benchmark checkpoints
 

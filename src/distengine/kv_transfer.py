@@ -62,7 +62,13 @@ def export_prefill(runner, request: Request) -> dict:
 
 
 @torch.inference_mode()
-def import_prefill(runner, payload: dict) -> Request:
+def import_prefill(
+    runner,
+    payload: dict,
+    *,
+    reserve_full: bool = False,
+) -> Request:
+    
     """Validate before allocation; publish cache only after every layer copies."""
     required = {
         "version",
@@ -105,6 +111,9 @@ def import_prefill(runner, payload: dict) -> Request:
         )
     ):
         raise ValueError("Invalid request ID or token metadata")
+    
+    if type(reserve_full) is not bool:
+        raise ValueError("reserve_full must be a boolean")
 
     request = Request(
         payload["request_id"],
@@ -150,7 +159,12 @@ def import_prefill(runner, payload: dict) -> Request:
     if maximum > runner.block_manager.num_blocks * runner.block_manager.block_size:
         raise ValueError("Transferred request exceeds destination pool capacity")
 
-    table = runner.block_manager.allocate(request.request_id, length)
+    allocation_length = maximum if reserve_full else length
+
+    table = runner.block_manager.allocate(
+        request.request_id,
+        allocation_length,
+    )
     cache = None
 
     try:

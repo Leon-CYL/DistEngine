@@ -101,6 +101,10 @@ class PrefillActorImpl:
     @ray.method
     def export_request(self, request_id: str) -> dict:
         return self.worker.export_request(request_id)
+    
+    @ray.method
+    def peek_ready(self) -> dict | None:
+        return self.worker.peek_ready()
 
     @ray.method
     def release(self, request_id: str) -> dict:
@@ -141,10 +145,29 @@ class DecodeActorImpl:
             max_new_tokens,
             eos_token_id,
         )
-
+    
     @ray.method
-    def import_request(self, payload: dict) -> dict:
-        return self.worker.import_request(payload)
+    def import_request(
+        self,
+        payload: dict,
+        *,
+        reserve_full: bool = False,
+    ) -> dict:
+        return self.worker.import_request(
+            payload,
+            reserve_full=reserve_full,
+        )
+        
+    @ray.method
+    def can_admit(
+        self,
+        num_prompt_tokens: int,
+        max_new_tokens: int,
+    ) -> bool:
+        return self.worker.can_admit(
+            num_prompt_tokens,
+            max_new_tokens,
+        )
 
     @ray.method
     def step(self, request_id: str) -> dict:

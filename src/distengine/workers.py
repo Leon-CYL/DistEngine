@@ -166,33 +166,48 @@ class PrefillWorker(_WorkerBase):
             self.prefill_pool.remove(request_id)
 
         return result
+    
+    def peek_ready(self) -> dict | None:
+        self._ensure_open()
+        
+        request_id = self.prefill_pool.peek()
+        if request_id is None:
+            return None
+        
+        request = self.requests[request_id]
+        
+        return {
+            "request_id": request.request_id,
+            "num_prompt_tokens": request.num_prompt_tokens,
+            "max_new_tokens": request.max_new_tokens,
+        }
         
 class DecodeWorker(_WorkerBase):
-    def import_request(self, payload: dict) -> dict:
+    def import_request(
+        self,
+        payload: dict,
+        *,
+        reserve_full: bool = False,
+    ) -> dict:
         from .kv_transfer import import_prefill
 
         self._ensure_open()
-        if (isinstance(payload, dict) and isinstance(payload.get("request_id"), str)
-                and payload["request_id"] in self.requests):
+
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("request_id"), str)
+            and payload["request_id"] in self.requests
+        ):
             raise ValueError("Request ID is already active")
-        request = import_prefill(self.runner, payload)
+
+        request = import_prefill(
+            self.runner,
+            payload,
+            reserve_full=reserve_full,
+        )
+
         self.requests[request.request_id] = request
         return self._snapshot(request)
-
-    def prepare_local_fixture(
-        self,
-        request_id: str,
-        prompt_token_ids: list[int],
-        max_new_tokens: int,
-        eos_token_id: int,
-    ) -> dict:
-        """Test setup: prefill locally until KV import exists."""
-        return self._start_local(
-            request_id,
-            prompt_token_ids,
-            max_new_tokens,
-            eos_token_id,
-        )
 
     def step(self, request_id: str) -> dict:
         self._ensure_open()
@@ -216,3 +231,38 @@ class DecodeWorker(_WorkerBase):
             self.release(request_id)
 
         return result
+    
+    def prepare_local_fixture(
+        self,
+        request_id: str,
+        prompt_token_ids: list[int],
+        max_new_tokens: int,
+        eos_token_id: int,
+    ) -> dict:
+        return self._start_local(
+            request_id,
+            prompt_token_ids,
+            max_new_tokens,
+            eos_token_id,
+        )
+        
+    def can_admit(
+        self,
+        num_prompt_tokens: int,
+        max_new_tokens: int,
+    ) -> bool:
+        self._ensure_open()
+
+        if type(num_prompt_tokens) is not int or num_prompt_tokens <= 0:
+            raise ValueError("num_prompt_tokens must be a positive integer")
+
+        if type(max_new_tokens) is not int or max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be a positive integer")
+
+        maximum = num_prompt_tokens + max_new_tokens - 1
+        manager = self.runner.block_manager
+
+        if maximum > manager.num_blocks * manager.block_size:
+            raise ValueError("Request exceeds destination pool capacity")
+
+        return manager.can_allocate(maximum)
