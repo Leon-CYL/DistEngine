@@ -45,6 +45,8 @@ class _WorkerBase:
             "active_request_ids": list(self.requests),
             "num_free_blocks": self.runner.block_manager.num_free_blocks,
             "num_blocks": self.runner.block_manager.num_blocks,
+            "block_size": self.runner.block_manager.block_size,
+            "vocab_size": self.runner.model.config.vocab_size,
             "closed": self.closed,
         }
 
@@ -182,6 +184,30 @@ class PrefillWorker(_WorkerBase):
             "max_new_tokens": request.max_new_tokens,
         }
         
+    def can_prefill(
+        self,
+        num_prompt_tokens: int,
+        max_new_tokens: int,
+    ) -> bool:
+        self._ensure_open()
+
+        if type(num_prompt_tokens) is not int or num_prompt_tokens <= 0:
+            raise ValueError("num_prompt_tokens must be a positive integer")
+
+        if type(max_new_tokens) is not int or max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be a positive integer")
+
+        manager = self.runner.block_manager
+        maximum = num_prompt_tokens + max_new_tokens - 1
+
+        if maximum > manager.num_blocks * manager.block_size:
+            raise ValueError("Request exceeds worker KV capacity")
+
+        if self.prefill_pool.is_full():
+            return False
+
+        return manager.can_allocate(num_prompt_tokens)
+            
 class DecodeWorker(_WorkerBase):
     def import_request(
         self,

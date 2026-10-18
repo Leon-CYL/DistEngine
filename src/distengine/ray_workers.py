@@ -75,9 +75,10 @@ class PrefillActorImpl:
         seed: int = 0,
         device: str = "cpu",
         checkpoint: bool = False,
+        max_held_requests: int = 4,
     ):
         model = build_worker_model(seed, device, checkpoint)
-        self.worker = PrefillWorker(model, num_blocks, block_size, holding_pool=PrefillHoldingPool(max_held_requests=4))
+        self.worker = PrefillWorker(model, num_blocks, block_size, holding_pool=PrefillHoldingPool(max_held_requests))
 
     @ray.method
     def ready(self) -> dict:
@@ -97,6 +98,14 @@ class PrefillActorImpl:
             max_new_tokens,
             eos_token_id,
         )
+        
+    @ray.method
+    def can_prefill(
+        self,
+        num_prompt_tokens: int,
+        max_new_tokens: int,
+    ) -> bool:
+        return self.worker.can_prefill(num_prompt_tokens, max_new_tokens)
 
     @ray.method
     def export_request(self, request_id: str) -> dict:

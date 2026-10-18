@@ -504,6 +504,69 @@ automatic recovery and durable/exactly-once handoff are not implemented. All
 production decode admissions must use full reservation to retain the guarantee
 that admitted requests can finish without competing for future KV blocks.
 
+## Stage 16 — Backpressure
+
+Status: complete; ordinary CPU, real Ray CPU, and two-GPU pinned TinyLlama
+backpressure verified.
+
+- Added `Coordinator` and driver-side `RayCoordinator` with copied immutable
+  submissions, upstream FIFO queues, lifetime request-ID reservation, and
+  validation against both workers' vocabularies and total KV capacities.
+  Coordinators require fresh open workers and exclusive serial ownership.
+- Added read-only `can_prefill()` checks and the Ray actor wrapper. Requests wait
+  upstream when holding slots or prompt KV blocks are unavailable. Prefill
+  removes queued metadata only after successful execution.
+- Each tick advances one decode request in round-robin order, attempts one FIFO
+  decode pull, then attempts one prefill. Decode progress frees capacity so held
+  transfers and upstream admission resume automatically.
+- Completed results are retained across later tick failures and drained once.
+  Failed decode requests retired by workers are removed from scheduling; errors
+  propagate rather than being treated as ordinary capacity pressure.
+- Made the Ray prefill holding limit configurable and exposed vocabulary and
+  block-size metadata for remote validation.
+- Added `verify_backpressure.py`, `verify_ray_backpressure.py`,
+  `verify_gpu_backpressure.py`, and `src/Modal/run_backpressure.py`; included the
+  verification modules in wheel packaging.
+
+Verified from the user's October 17, 2026 local terminal output:
+
+- `PYTHONPATH=src uv run python -m verify_backpressure` passed upstream waiting,
+  continued decode, automatic resumption, baseline agreement, cleanup, completion
+  retention after later failure, single completion delivery, immediate finish,
+  fresh-worker guards, and round-robin queue rotation.
+- `PYTHONPATH=src uv run python -m verify_ray_backpressure` passed real Ray CPU
+  upstream waiting, decode progress, automatic resumption, output agreement,
+  and full resource release.
+
+Verified on Modal on October 17, 2026 (Pacific time; remote logs use October 18
+UTC), from the user's terminal output and `results/stage16-backpressure.json`:
+
+- Small-model and pinned TinyLlama runs both passed on two Tesla T4 GPUs, with
+  separate prefill/decode processes and disjoint Ray GPU IDs 0 and 1.
+- The actual `RayCoordinator` used a holding limit of one and three queued
+  requests per prompt. Tests demonstrated one decoding request, one held request,
+  and one upstream waiting request, followed by automatic admission resumption.
+- TinyLlama used float32, revision `fe8a4ea1ffedaf415f4da2f062534de366a451e6`,
+  Python 3.11.12, PyTorch 2.14.1+cu130, and Ray 2.59.0.
+- All three requests in each prompt case exactly matched uncached CUDA generation:
+  factual (8 tokens each, 23 ticks), explanation (32 tokens each, 95 ticks), and
+  sentence completion (21 tokens each, 62 ticks). Queues drained, completions were
+  delivered once, and all KV blocks were released between cases.
+- Closing workers with unfinished decoding and held work released their KV.
+  CPU backpressure checks also passed in the remote image.
+- The initial small-model test setup allowed two one-block requests to fit and
+  failed its saturation precondition. Increasing its output limit to eight
+  ensured all cases force pressure; both subsequent GPU runs passed.
+- The saved default report contains the pinned TinyLlama run, replacing the
+  earlier small-model report.
+- Small-model run: https://modal.com/apps/leonlin0106/main/ap-BySxAGAwM8kCQCee5VXD9L
+- TinyLlama run: https://modal.com/apps/leonlin0106/main/ap-KMHAKpDd6jlv42j2dviuuW
+
+Scope: one prefill worker and one decode worker, synchronous serial scheduling,
+request-level FIFO admission, and round-robin unbatched decode. The upstream
+queue is in memory and unbounded; durable recovery, concurrent coordinators,
+multiple prefill workers, and performance claims remain outside this stage.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
@@ -524,7 +587,7 @@ that admitted requests can finish without competing for future KV blocks.
 | 13 | KV transfer | Implement explicit KV and request-metadata transfer between actors, initially GPU → CPU → GPU if necessary; verify end-to-end output correctness across the two GPUs. | Complete |
 | 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Complete |
 | 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Complete |
-| 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Pending |
+| 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Complete |
 | 17 | Multiple prefill workers | Independent prefill workers and request queues. | Pending |
 | 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Pending |
 | 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Pending |
@@ -541,8 +604,10 @@ that admitted requests can finish without competing for future KV blocks.
   `uv run modal run src/Modal/run_admission.py`. Actual pull orchestration,
   pinned TinyLlama output agreement, capacity denial/retry, full reservation,
   source retention, and cleanup passed; report: `results/stage15-admission.json`.
-- After stage 16, verify holding-pool saturation, upstream waiting, and resumed
-  admission as decode releases capacity on the two-GPU system.
+- Stage 16 two-GPU checkpoint completed on October 17, 2026 using
+  `uv run modal run src/Modal/run_backpressure.py`: holding-pool saturation,
+  upstream waiting, continued decode, automatic resumption, baseline output
+  agreement, and cleanup passed. Report: `results/stage16-backpressure.json`.
 - After stage 17, verify multiple prefill GPUs and request isolation before GPU
   baseline measurements at stage 20. Repeat correctness checks after scheduling
   changes in stage 21 and decode-worker expansion in stage 22, and before the

@@ -38,3 +38,6 @@ packages = ["src/distengine", "src/models", "src/layers"]
 "src/verify_transfer.py" = "verify_transfer.py"
 "src/verify_holding_pool.py" = "verify_holding_pool.py"
 "src/verify_admission.py" = "verify_admission.py"
+"src/verify_backpressure.py" = "verify_backpressure.py"
+"src/verify_ray_backpressure.py" = "verify_ray_backpressure.py"
+"src/verify_gpu_backpressure.py" = "verify_gpu_backpressure.py"
