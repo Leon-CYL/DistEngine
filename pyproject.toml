@@ -41,3 +41,5 @@ packages = ["src/distengine", "src/models", "src/layers"]
 "src/verify_backpressure.py" = "verify_backpressure.py"
 "src/verify_ray_backpressure.py" = "verify_ray_backpressure.py"
 "src/verify_gpu_backpressure.py" = "verify_gpu_backpressure.py"
+"src/verify_multi_prefill_ray.py" = "verify_multi_prefill_ray.py"
+"src/verify_gpu_multi_prefill.py" = "verify_gpu_multi_prefill.py"

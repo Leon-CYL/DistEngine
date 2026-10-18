@@ -567,6 +567,63 @@ request-level FIFO admission, and round-robin unbatched decode. The upstream
 queue is in memory and unbounded; durable recovery, concurrent coordinators,
 multiple prefill workers, and performance claims remain outside this stage.
 
+## Stage 17 — Multiple prefill workers
+
+Status: complete; ordinary CPU scheduling checks, real Ray CPU orchestration,
+and three-GPU pinned TinyLlama verification passed.
+
+- Added `MultiPrefillCoordinator` with independent upstream FIFO queues and
+  holding pools, fixed round-robin submission placement, global lifetime ID
+  reservation, rotating source pull priority, and round-robin decode scheduling.
+  A blocked source does not prevent admission from another eligible source.
+- Added driver-side `MultiPrefillRayCoordinator`. Eligible prefill calls are
+  dispatched across actors before waiting for their results, allowing concurrent
+  prefill execution. All dispatched results are reconciled before propagating
+  the first prefill failure; successful peers are not left untracked.
+- Constructors reject duplicate workers/actors and require fresh open workers.
+  Ray readiness metadata now includes actor identity. Completion buffering,
+  explicit error propagation, full decode reservations, and source ownership
+  until successful import are preserved.
+- Added `verify_multi_prefill_ray.py`, `verify_gpu_multi_prefill.py`, and
+  `src/Modal/run_multi_prefill.py`; verification modules are included in wheel
+  packaging. The Modal entry point runs real Ray CPU checks before GPU checks.
+
+Verification on October 17, 2026 (Pacific time):
+
+- Local ordinary-worker checks passed round-robin placement, global duplicate
+  rejection, source failure isolation, baseline output agreement, completion
+  delivery, and cleanup. Deferred actor-adapter checks verified dispatch before
+  waiting and reconciliation of a successful peer after another source failed.
+- The user's `PYTHONPATH=src uv run python -m verify_multi_prefill_ray` run passed
+  real Ray CPU placement, duplicate guards, independent holding, admission,
+  mixed-prompt output agreement, and cleanup.
+- Both Modal commands passed: `uv run modal run src/Modal/run_multi_prefill.py
+  --no-checkpoint` and `uv run modal run src/Modal/run_multi_prefill.py`.
+- Three Tesla T4 GPUs hosted separate actor processes: two prefill actors and one
+  decode actor, with disjoint Ray GPU IDs 0, 1, and 2. Each actor saw one CUDA
+  device, with model and KV placement verified.
+- Pinned TinyLlama used float32, revision
+  `fe8a4ea1ffedaf415f4da2f062534de366a451e6`, Python 3.11.12,
+  PyTorch 2.14.1+cu130, and Ray 2.59.0.
+- Six queued requests mixed the three reference prompts, with three submissions
+  assigned to each source. Tests verified separate held requests, one source
+  admitting and refilling while the other remained held, and upstream waiting
+  while decode capacity was occupied.
+- All six outputs exactly matched uncached CUDA generation: two factual outputs
+  of 8 tokens, two explanation outputs of 32 tokens, and two sentence-completion
+  outputs of 21 tokens. All completed once within 118 ticks; all queues drained
+  and KV blocks were released. Closing all three workers with unfinished held
+  and decoding requests also released their KV.
+- Saved `results/stage17-multi-prefill.json` contains the pinned TinyLlama run,
+  replacing the small-model report at the same default path.
+- Small-model run: https://modal.com/apps/leonlin0106/main/ap-OIOV21uAMdMOTQA6YUW1eT
+- TinyLlama run: https://modal.com/apps/leonlin0106/main/ap-mQ1mSxh6rQPLxrj1mBs5fy
+
+Scope: fixed source assignment with no stealing, one decode worker, serial driver
+ticks with concurrent prefill dispatch, unbatched decode, in-memory queues, and
+explicit retries. These are correctness checks, not performance measurements.
+Reproducible arrival workloads and benchmark instrumentation remain stages 18–20.
+
 ## Roadmap
 
 | Stage | Focus | Completion checkpoint | Status |
@@ -588,7 +645,7 @@ multiple prefill workers, and performance claims remain outside this stage.
 | 14 | Prefill KV holding pool | Retain ready KV until decode admission; bounded capacity. | Complete |
 | 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Complete |
 | 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Complete |
-| 17 | Multiple prefill workers | Independent prefill workers and request queues. | Pending |
+| 17 | Multiple prefill workers | Independent prefill workers and request queues. | Complete |
 | 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Pending |
 | 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Pending |
 | 20 | Metrics + baseline benchmark | Instrument TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy; save a no-stealing baseline before implementing stealing. | Pending |
@@ -608,10 +665,12 @@ multiple prefill workers, and performance claims remain outside this stage.
   `uv run modal run src/Modal/run_backpressure.py`: holding-pool saturation,
   upstream waiting, continued decode, automatic resumption, baseline output
   agreement, and cleanup passed. Report: `results/stage16-backpressure.json`.
-- After stage 17, verify multiple prefill GPUs and request isolation before GPU
-  baseline measurements at stage 20. Repeat correctness checks after scheduling
-  changes in stage 21 and decode-worker expansion in stage 22, and before the
-  final stage 24 benchmark.
+- Stage 17 three-GPU checkpoint completed on October 17, 2026 using
+  `uv run modal run src/Modal/run_multi_prefill.py`: multiple prefill actors,
+  independent queues and holding pools, mixed-prompt output agreement, and
+  cleanup passed. Report: `results/stage17-multi-prefill.json`.
+- Repeat GPU correctness checks after scheduling changes in stage 21 and
+  decode-worker expansion in stage 22, and before the final stage 24 benchmark.
 
 ## Benchmark checkpoints
 

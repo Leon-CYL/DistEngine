@@ -50,6 +50,7 @@ def build_worker_model(seed: int, device: str, checkpoint: bool):
 def actor_info(worker) -> dict:
     info = worker.info()
     info.update({
+        "actor_id": ray.get_runtime_context().get_actor_id(),
         "node_id": ray.get_runtime_context().get_node_id(),
         "ray_gpu_ids": ray.get_runtime_context().get_accelerator_ids().get("GPU", []),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
