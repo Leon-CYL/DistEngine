@@ -82,6 +82,14 @@ class PrefillActorImpl:
         self.worker = PrefillWorker(model, num_blocks, block_size, holding_pool=PrefillHoldingPool(max_held_requests))
 
     @ray.method
+    def start_measurement(self):
+        self.worker.start_measurement()
+
+    @ray.method
+    def telemetry(self, stop=False):
+        return self.worker.telemetry(stop=stop)
+
+    @ray.method
     def ready(self) -> dict:
         return actor_info(self.worker)
 
@@ -136,6 +144,14 @@ class DecodeActorImpl:
     ):
         model = build_worker_model(seed, device, checkpoint)
         self.worker = DecodeWorker(model, num_blocks, block_size)
+
+    @ray.method
+    def start_measurement(self):
+        self.worker.start_measurement()
+
+    @ray.method
+    def telemetry(self, stop=False):
+        return self.worker.telemetry(stop=stop)
 
     @ray.method
     def ready(self) -> dict:

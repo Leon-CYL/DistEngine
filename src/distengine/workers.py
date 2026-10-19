@@ -1,5 +1,9 @@
 import os
 import sys
+import time
+import torch
+
+from .telemetry import WorkerActivity, measured
 
 from distengine.engine import LLMEngine
 from distengine.request import Request
@@ -21,6 +25,7 @@ class _WorkerBase:
         self.runner = engine.runner
         self.requests: dict[str, Request] = {}
         self.closed = False
+        self.activity = None
 
     def _ensure_open(self):
         if self.closed:
@@ -50,6 +55,27 @@ class _WorkerBase:
             "closed": self.closed,
         }
 
+    def _sync_measurement(self):
+        if self.runner.device.type == "cuda":
+            torch.cuda.synchronize(self.runner.device)
+
+    def start_measurement(self):
+        self._ensure_open()
+        self._sync_measurement()
+        self.activity = WorkerActivity()
+
+    def telemetry(self, stop=False):
+        if stop and self.activity is not None and self.activity.stopped is None:
+            self._sync_measurement()
+            self.activity.stopped = time.perf_counter()
+        info = self.info()
+        info["held_requests"] = len(self.prefill_pool) if hasattr(self, "prefill_pool") else 0
+        info["kv_blocks_used"] = info["num_blocks"] - info["num_free_blocks"]
+        info["kv_occupancy_fraction"] = info["kv_blocks_used"] / info["num_blocks"]
+        info["activity"] = self.activity.report() if self.activity is not None else None
+        return info
+
+    @measured("release")
     def release(self, request_id: str) -> dict:
         self._ensure_open()
 
@@ -130,6 +156,7 @@ class PrefillWorker(_WorkerBase):
         super().__init__(model, num_blocks, block_size)
         self.prefill_pool = holding_pool
     
+    @measured("export_request")
     def export_request(self, request_id: str) -> dict:
         """Keep source ownership until the destination acknowledges import."""
         from .kv_transfer import export_prefill
@@ -137,6 +164,7 @@ class PrefillWorker(_WorkerBase):
         self._ensure_open()
         return export_prefill(self.runner, self.requests[request_id])
 
+    @measured("prefill")
     def prefill(
         self,
         request_id: str,
@@ -161,6 +189,7 @@ class PrefillWorker(_WorkerBase):
 
         return result
     
+    @measured("release")
     def release(self, request_id: str) -> dict:
         result = super().release(request_id)
 
@@ -209,6 +238,7 @@ class PrefillWorker(_WorkerBase):
         return manager.can_allocate(num_prompt_tokens)
             
 class DecodeWorker(_WorkerBase):
+    @measured("import_request")
     def import_request(
         self,
         payload: dict,
@@ -235,6 +265,7 @@ class DecodeWorker(_WorkerBase):
         self.requests[request.request_id] = request
         return self._snapshot(request)
 
+    @measured("step")
     def step(self, request_id: str) -> dict:
         self._ensure_open()
         request = self.requests[request_id]

@@ -441,7 +441,7 @@ caller remains responsible for worker cleanup.
 
 Stage 18 establishes CPU correctness. GPU/Ray replay and performance measurement
 are unverified; mixed prompt lengths follow in stage 19, with timing metrics
-and baseline benchmarking in stage 20.
+and baseline benchmarking in stage 21.
 
 ## Mixed prompt workload (Stage 19)
 
@@ -456,7 +456,8 @@ are 53–64, 137–160, and 520–529 tokens respectively.
 model/tokenizer revision, both seeds, selection settings, request-to-prompt
 mapping, SHA-256 hashes, and round-robin token totals. For two prefill sources,
 those totals are 6,404 and 6,751: a modest 5.4% difference in input tokens.
-Runtime imbalance and performance benefits remain unmeasured.
+This input distribution alone does not establish runtime imbalance or a benefit
+from stealing; stage 21 measures the baseline and stage 22 will compare modes.
 
 Run the verification from the repository root:
 
@@ -488,13 +489,14 @@ Replay the saved file with `load_workload()` and `replay_workload()` as in stage
 18. Configure every worker with at least 1,024 KV token slots (for example,
 `num_blocks=64, block_size=16`) to match the manifest's capacity validation.
 Keep the frozen request order and file checksums identical across comparisons.
-Stage 20 will determine suitable offered rates and collect the GPU baseline;
+Stage 21 collects the GPU baseline at the frozen offered rate;
 the frozen 2 RPS setting is an experimental input, not a capacity estimate.
 
-## Multiple decode workers (Stage 22, moved before Stage 20)
+## Multiple decode workers (Stage 20)
 
-Stage 22 now precedes baseline benchmarking. Stage numbers are preserved;
-execution continues 19 → 22 → 20 → 21. The baseline and later stealing comparison
+Multiple decode workers now precede baseline benchmarking; execution continues
+19 → 20 → 21 → 22. Existing `stage22-multi-decode.json` reports retain their
+original filenames. The baseline and later stealing comparison
 must use the same prefill/decode worker counts and capacity settings.
 
 ```python
@@ -559,3 +561,107 @@ Verified on October 18, 2026: ordinary CPU, real four-process Ray CPU, and pinne
 TinyLlama float32 on four Tesla T4s all passed. Eight GPU outputs matched
 uncached generation in 94 ticks, with fixed ownership and full cleanup.
 The saved report is `results/stage22-multi-decode.json`.
+
+## Driver request metrics (Stage 21)
+
+`distengine.metric` provides `MetricsRecorder` and `LatencyLimits`. Ordinary and
+Ray multi-prefill/multi-decode coordinators accept an optional `metrics=` recorder.
+Replay uses that same recorder and clock, records submission delay, and freezes
+measurement duration when the workload drains. Models and warm-up should be
+ready before starting measurement. For example, with a fresh coordinator:
+
+```python
+from distengine.metric import LatencyLimits, MetricsRecorder
+from distengine.workload import load_workload, replay_workload
+
+# coordinator already owns fresh workers; model setup is outside measurement.
+workload = load_workload("workloads/stage19/mixed-v1.json")
+metrics = MetricsRecorder()
+coordinator.metrics = metrics
+results = replay_workload(workload, coordinator, metrics=metrics)
+# Example limits only: choose benchmark thresholds before running comparisons.
+report = metrics.report(LatencyLimits(ttft_s=2.0, tpot_s=0.1, e2e_s=10.0))
+```
+
+Reports include raw timestamps, TTFT, mean per-request TPOT, E2E, submission delay,
+wait until first prefill dispatch, p50/p95/p99, completed requests/second,
+completed output tokens/second, goodput, failures, and unfinished counts.
+One-token outputs have undefined TPOT and use only TTFT/E2E for goodput. Prefill
+counts the first token; KV import never counts it twice. Ray results are observed
+in readiness order, and local results are observed before the next worker runs.
+These measurements include driver/transport delays and are not GPU kernel times.
+
+A coordinator exception can leave a request live, such as after successful import
+but failed source release. Replay records such exceptions separately; only rejected
+submissions and definitively retired decode requests are classified as failed.
+Errors still propagate, and the caller remains responsible for worker cleanup.
+
+```bash
+PYTHONPATH=src uv run python src/verify_metrics.py
+PYTHONPATH=src uv run python src/verify_multi_decode_ray.py --metrics
+```
+
+These passed CPU and four-process Ray verification. The system sampler and
+benchmark runner below add queue/KV state, worker activity, GPU utilization,
+and repeated baseline reports.
+
+## System sampling and baseline benchmark (Stage 21)
+
+The benchmark records request timing alongside upstream/decode queue lengths,
+held requests, KV blocks used, per-worker activity/idle time, and background
+`nvidia-smi` utilization/memory samples. Workers synchronize CUDA at the boundaries
+of measured operations. Nested operations count once, so a decode's internal
+release is not double-counted. Worker idle means wall time outside measured
+operations; GPU utilization is measured separately.
+
+Check the sampler and run a small CPU benchmark:
+
+```bash
+PYTHONPATH=src uv run python src/verify_system_metrics.py
+PYTHONPATH=src uv run python src/benchmark_stage21.py --cpu --repeats 3 \
+  --output results/stage21-my-cpu-smoke
+```
+
+Run the full baseline on two prefill and two decode T4 GPUs (Modal charges apply):
+
+```bash
+modal run src/Modal/run_benchmark.py --repeats 3 \
+  --output results/stage21-my-baseline
+```
+
+This replays all 100 frozen stage 19 requests unchanged, with stealing disabled.
+Before each measured repeat it warms up four requests using the longest prompt.
+It compares every output with uncached generation and requires full KV release.
+Workers each have 64 blocks of 16 tokens and a prefill holding capacity of two.
+The helper sends local frozen input files to Modal; they do not need to be tracked
+in Git. If absent, regenerate them with `src/freeze_workload.py` before running.
+The Modal launcher handles local files using only the standard library; model
+execution uses Python 3.11 in the container.
+
+Default goodput thresholds are TTFT 2 seconds, TPOT 0.1 seconds and E2E 10 seconds.
+Override with `--ttft-limit`, `--tpot-limit`, and `--e2e-limit` before starting an
+experiment, and preserve those settings across comparisons. These initial limits
+are experiment definitions, not hardware performance guarantees.
+
+Each new output directory contains `baseline.json` and `run-00.json`,
+`run-01.json`, etc. Reports include raw measurements, outputs, model/configuration,
+original frozen inputs, source/dependency hashes, placement, sampling settings,
+per-run latency distributions, and mean/standard deviation across repeats.
+Existing output directories are rejected to preserve previous results.
+
+Queue/KV snapshots are taken between ticks, so transient peaks can be missed.
+Worker activity windows use each worker's reset/stop RPC rather than the exact
+request window. Sampling, RPC, and explicit CUDA synchronization overhead remains
+inside the measured run. GPU utilization uses NVIDIA's sampling window; GPU memory
+includes weights and allocator caches. Request latency starts at actual submission;
+inspect submission delay as well when the blocking driver falls behind arrivals.
+KV occupancy counts allocated/reserved blocks, including full decode reservations,
+rather than only valid token positions already written.
+
+Stage 21 completed on October 18, 2026. Three four-T4 TinyLlama repeats each
+completed all 100 frozen requests with exact uncached CUDA outputs and full KV
+cleanup. Mean throughput was 0.9834 requests/second and 31.4678 output tokens/second.
+Goodput was zero under the predefined latency limits; output correctness and
+measurement verification passed, while those latency targets were not met.
+The saved baseline is `results/stage21-baseline/baseline.json`, with separate
+per-run JSON files in the same directory. Use a new output directory for reruns.

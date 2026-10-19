@@ -2,11 +2,14 @@ from collections import deque
 
 from .admission import pull_one
 from .coordinator import Submission
+from .metric import MetricsRecorder, _MetricsHooks
 from .workers import PrefillWorker, DecodeWorker
 
 
-class MultiPrefillCoordinator:
-    def __init__(self, sources: list[PrefillWorker], target: DecodeWorker):
+class MultiPrefillCoordinator(_MetricsHooks):
+    def __init__(self, sources: list[PrefillWorker], target: DecodeWorker,
+                 *, metrics: MetricsRecorder | None = None):
+        self.metrics = metrics
         if not sources:
             raise ValueError("At least one prefill worker is required")
         
@@ -89,6 +92,7 @@ class MultiPrefillCoordinator:
             max_new_tokens=max_new_tokens,
             eos_token_id=eos_token_id,
         )
+        self._record_submission(request_id)
         self.waiting[self.next_submit].append(submission)
         self.seen_ids.add(request_id)
         self.next_submit = (self.next_submit + 1) % len(self.sources)
@@ -103,16 +107,19 @@ class MultiPrefillCoordinator:
         request_id = self.decode_ready[0]
         try:
             result = self.target.step(request_id)
-        except Exception:
+        except Exception as exc:
             if request_id not in self.target.requests:
                 self.decode_ready.popleft()
+                self._record_retired(request_id, exc)
             raise
 
         self.decode_ready.popleft()
         if result["status"] != "FINISHED":
             self.decode_ready.append(request_id)
+            self._record_result(result)
             return None
 
+        self._record_result(result)
         return result
 
     def _pull_one(self) -> None:
@@ -141,6 +148,7 @@ class MultiPrefillCoordinator:
         ):
             return None
 
+        self._record_prefill_dispatch(submission.request_id)
         result = source.prefill(
             submission.request_id,
             list(submission.prompt_token_ids),
@@ -149,6 +157,7 @@ class MultiPrefillCoordinator:
         )
 
         queue.popleft()
+        self._record_result(result)
 
         if result["status"] == "FINISHED":
             return result

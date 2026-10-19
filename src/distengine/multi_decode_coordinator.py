@@ -32,42 +32,30 @@ class _MultiDecodeScheduling:
             raise first_error
 
     def _decode_targets(self):
-        pending = []
         first_error = None
-        # Ray dispatches all selected actors before resolving any decode result.
-        for index, target in enumerate(self.targets):
-            if not self.decode_ready[index]:
-                continue
-            request_id = self.decode_ready[index][0]
-            try:
-                pending.append((index, request_id, self._dispatch(target, "step", request_id)))
-            except Exception as exc:
-                self._discard_failed_decode(index, request_id)
+        for index, request_id, result, error in self._decode_outcomes():
+            if error is not None:
+                self._discard_failed_decode(index, request_id, error)
                 if first_error is None:
-                    first_error = exc
-        for index, request_id, ref in pending:
-            try:
-                result = self._resolve(ref)
-            except Exception as exc:
-                self._discard_failed_decode(index, request_id)
-                if first_error is None:
-                    first_error = exc
+                    first_error = error
             else:
                 self.decode_ready[index].popleft()
                 if result["status"] == "FINISHED":
                     self.completed.append(result)
                 else:
                     self.decode_ready[index].append(request_id)
+                self._record_result(result)
         if first_error is not None:
             raise first_error
 
-    def _discard_failed_decode(self, index, request_id):
+    def _discard_failed_decode(self, index, request_id, error):
         try:
             info = self._info(self.targets[index])
         except Exception:
             return  # Keep ownership if an actor's outcome is unknown.
         if request_id not in info["active_request_ids"]:
             self.decode_ready[index].popleft()
+            self._record_retired(request_id, error)
 
     def _pull_targets(self):
         first_error = None
@@ -130,7 +118,7 @@ class MultiDecodeCoordinator(_MultiDecodeScheduling, MultiPrefillCoordinator):
     as required by the existing KV handoff contract.
     """
 
-    def __init__(self, sources, targets):
+    def __init__(self, sources, targets, *, metrics=None):
         self.targets = list(targets)
         sources = list(sources)
         if not self.targets:
@@ -149,7 +137,7 @@ class MultiDecodeCoordinator(_MultiDecodeScheduling, MultiPrefillCoordinator):
                 raise ValueError("Coordinator requires fresh workers")
         if len({id(w.runner.storage) for w in workers}) != len(workers):
             raise ValueError("Workers must have independent KV storage")
-        super().__init__(sources, self.targets[0])
+        super().__init__(sources, self.targets[0], metrics=metrics)
         self._init_decode()
 
     def _submission_targets(self):
@@ -178,6 +166,19 @@ class MultiDecodeCoordinator(_MultiDecodeScheduling, MultiPrefillCoordinator):
 
     def _export(self, source, request_id):
         return source.export_request(request_id)
+
+    def _decode_outcomes(self):
+        # Yield immediately after each local call, before the next worker runs.
+        for index, target in enumerate(self.targets):
+            if not self.decode_ready[index]:
+                continue
+            request_id = self.decode_ready[index][0]
+            try:
+                result = target.step(request_id)
+            except Exception as exc:
+                yield index, request_id, None, exc
+            else:
+                yield index, request_id, result, None
 
     def _prefill_all(self):
         first_error = None

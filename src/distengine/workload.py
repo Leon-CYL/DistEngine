@@ -7,6 +7,8 @@ import time
 from collections.abc import Callable
 from typing import Literal, Protocol
 
+from .metric import MetricsRecorder
+
 
 @dataclass(frozen=True)
 class ScheduledRequest:
@@ -219,6 +221,8 @@ def replay_workload(
     *,
     clock: Callable[[], float] = time.perf_counter,
     sleep: Callable[[float], None] = time.sleep,
+    metrics: MetricsRecorder | None = None,
+    sample: Callable[[], None] | None = None,
 ) -> list[dict]:
     """Submit scheduled arrivals and drain a fresh, exclusively owned coordinator.
 
@@ -227,6 +231,8 @@ def replay_workload(
     step. Completion dictionaries are returned in coordinator delivery order.
     Errors propagate without retrying submissions or closing caller-owned workers.
     Injected clocks must be monotonic, and sleep must advance or wait on that clock.
+    An optional recorder must be shared with the coordinator. Its clock and
+    origin define replay time, and successful draining freezes its report window.
     """
     if not isinstance(workload, Workload):
         raise ValueError("workload must be a Workload")
@@ -235,25 +241,54 @@ def replay_workload(
     if coordinator.has_pending():
         raise ValueError("Replay requires a coordinator with no pending work")
 
+    coordinator_metrics = getattr(coordinator, "metrics", None)
+    if metrics is None:
+        metrics = coordinator_metrics
+    if metrics is not None:
+        if metrics is not coordinator_metrics:
+            raise ValueError("Replay and coordinator must share the same recorder")
+        if metrics.requests or metrics.finished_at is not None:
+            raise ValueError("Replay requires a fresh metrics recorder")
+        if clock is not time.perf_counter and clock != metrics.clock:
+            raise ValueError("Replay and metrics must share the same clock")
+        clock = metrics.clock
+
     next_request = 0
     completed = []
-    start = clock()
+    start = clock() if metrics is None else metrics.started_at
     while next_request < len(workload.requests) or coordinator.has_pending():
         while next_request < len(workload.requests):
             request = workload.requests[next_request]
             if request.arrival_offset_s > clock() - start:
                 break
-            coordinator.submit(
-                request.request_id, list(request.prompt_token_ids),
-                request.max_new_tokens, request.eos_token_id,
-            )
+            if metrics is not None:
+                metrics.submitted(request.request_id, request.arrival_offset_s)
+            try:
+                coordinator.submit(
+                    request.request_id, list(request.prompt_token_ids),
+                    request.max_new_tokens, request.eos_token_id,
+                )
+            except Exception as exc:
+                if metrics is not None:
+                    metrics.failed(request.request_id, exc)
+                raise
             next_request += 1
 
+        if sample is not None:
+            sample()
+
         if coordinator.has_pending():
-            completed.extend(coordinator.step())
+            try:
+                completed.extend(coordinator.step())
+            except Exception as exc:
+                if metrics is not None:
+                    metrics.orchestration_failed(exc)
+                raise
         elif next_request < len(workload.requests):
             remaining = workload.requests[next_request].arrival_offset_s - (clock() - start)
             if remaining > 0:
                 sleep(remaining)
 
+    if metrics is not None:
+        metrics.finish()
     return completed

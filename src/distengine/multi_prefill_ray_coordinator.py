@@ -8,10 +8,12 @@ from ray import ObjectRef
 
 from .admission import pull_one_ray
 from .coordinator import Submission
+from .metric import MetricsRecorder, _MetricsHooks
 
 
-class MultiPrefillRayCoordinator:
-    def __init__(self, sources, target):
+class MultiPrefillRayCoordinator(_MetricsHooks):
+    def __init__(self, sources, target, *, metrics: MetricsRecorder | None = None):
+        self.metrics = metrics
         if not sources:
             raise ValueError("At least one prefill actor is required")
         self.sources = list(sources)
@@ -86,6 +88,7 @@ class MultiPrefillRayCoordinator:
             max_new_tokens=max_new_tokens,
             eos_token_id=eos_token_id,
         )
+        self._record_submission(request_id)
         self.waiting[self.next_submit].append(submission)
         self.seen_ids.add(request_id)
         self.next_submit = (self.next_submit + 1) % len(self.sources)
@@ -99,7 +102,7 @@ class MultiPrefillRayCoordinator:
         request_id = self.decode_ready[0]
         try:
             result = ray.get(cast(ObjectRef[dict], self.target.step.remote(request_id)))
-        except Exception:
+        except Exception as exc:
             # Preserve the original failure if the actor is unreachable.
             try:
                 info = ray.get(cast(ObjectRef[dict], self.target.ready.remote()))
@@ -107,11 +110,14 @@ class MultiPrefillRayCoordinator:
                 info = None
             if info is not None and request_id not in info["active_request_ids"]:
                 self.decode_ready.popleft()
+                self._record_retired(request_id, exc)
             raise
         self.decode_ready.popleft()
         if result["status"] != "FINISHED":
             self.decode_ready.append(request_id)
+            self._record_result(result)
             return None
+        self._record_result(result)
         return result
 
     def _pull_one(self) -> None:
@@ -138,6 +144,7 @@ class MultiPrefillRayCoordinator:
                 available = ray.get(cast(ObjectRef[bool], source.can_prefill.remote(
                     len(submission.prompt_token_ids), submission.max_new_tokens)))
                 if available:
+                    self._record_prefill_dispatch(submission.request_id)
                     ref = source.prefill.remote(
                         submission.request_id, list(submission.prompt_token_ids),
                         submission.max_new_tokens, submission.eos_token_id)
@@ -147,7 +154,11 @@ class MultiPrefillRayCoordinator:
                     first_error = exc
         # No prefill ray.get occurs until every eligible source was dispatched.
         # A failure cannot skip reconciliation of another actor's success.
-        for index, ref in pending:
+        remaining = {ref: index for index, ref in pending}
+        while remaining:
+            ready, _ = ray.wait(list(remaining), num_returns=1)
+            ref = ready[0]
+            index = remaining.pop(ref)
             try:
                 result = ray.get(ref)
             except Exception as exc:
@@ -157,6 +168,7 @@ class MultiPrefillRayCoordinator:
                 self.waiting[index].popleft()
                 if result["status"] == "FINISHED":
                     self.completed.append(result)
+                self._record_result(result)
         if first_error is not None:
             raise first_error
 

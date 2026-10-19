@@ -204,6 +204,8 @@ def check_decode_rotation_and_replay():
 
 def check_deferred_ray():
     from distengine.multi_decode_ray_coordinator import MultiDecodeRayCoordinator
+    from distengine.metric import MetricsRecorder
+    from verify_workload import FakeClock
 
     events = []
 
@@ -222,6 +224,8 @@ def check_deferred_ray():
                     if self.method == "ready":
                         self.result = self.actor.worker.info() | {"actor_id": self.actor.name}
                     else:
+                        if self.method == "step":
+                            metrics.clock.now += 1
                         self.result = getattr(self.actor.worker, self.method)(*args, **self.kwargs)
                 except Exception as exc:
                     self.error = exc
@@ -250,8 +254,11 @@ def check_deferred_ray():
     sources, targets = workers()
     actors = [Actor(w, str(i)) for i, w in enumerate([*sources, *targets])]
     try:
-        with patch("ray.get", side_effect=get):
-            c = MultiDecodeRayCoordinator(actors[:2], actors[2:])
+        with patch("ray.get", side_effect=get), patch(
+            "ray.wait", side_effect=lambda refs, **kwargs: ([refs[-1]], refs[:-1]),
+        ):
+            metrics = MetricsRecorder(FakeClock())
+            c = MultiDecodeRayCoordinator(actors[:2], actors[2:], metrics=metrics)
             c.submit("a", [10], 2, -1)
             c.submit("b", [20], 2, -1)
             c.step()
@@ -265,7 +272,14 @@ def check_deferred_ray():
                 raises(RuntimeError, c.step)
             step_events = [e for e in events if e[2] == "step"]
             assert [e[0] for e in step_events] == ["dispatch", "dispatch", "resolve", "resolve"]
+            assert [e[1] for e in step_events[2:]] == ["3", "2"]
             assert [r["request_id"] for r in c.drain_completed()] == [peer]
+            assert len(metrics.requests[peer].token_observed_s) == 2
+            assert metrics.requests[peer].error is None
+            assert metrics.requests[peer].finished_s == 1
+            failed = next(t for t in metrics.requests.values() if t.request_id != peer)
+            assert failed.error is not None and len(failed.token_observed_s) == 1
+            assert failed.finished_s == 2
             assert not c.has_pending()
             for w in (*sources, *targets):
                 check_empty(w)

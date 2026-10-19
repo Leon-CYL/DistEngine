@@ -49,3 +49,7 @@ packages = ["src/distengine", "src/models", "src/layers"]
 "src/verify_multi_decode.py" = "verify_multi_decode.py"
 "src/verify_multi_decode_ray.py" = "verify_multi_decode_ray.py"
 "src/verify_gpu_multi_decode.py" = "verify_gpu_multi_decode.py"
+"src/verify_metrics.py" = "verify_metrics.py"
+"src/benchmark_stage21.py" = "benchmark_stage21.py"
+"src/verify_system_metrics.py" = "verify_system_metrics.py"
+"src/benchmark_io.py" = "benchmark_io.py"
