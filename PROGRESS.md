@@ -622,7 +622,45 @@ Verification on October 17, 2026 (Pacific time):
 Scope: fixed source assignment with no stealing, one decode worker, serial driver
 ticks with concurrent prefill dispatch, unbatched decode, in-memory queues, and
 explicit retries. These are correctness checks, not performance measurements.
-Reproducible arrival workloads and benchmark instrumentation remain stages 18–20.
+Stage 18 adds reproducible arrival workloads; mixed workloads and benchmark
+instrumentation remain stages 19–20.
+
+## Stage 18 — Workload generator
+
+Status: complete; local CPU verification passed on October 18, 2026, including
+the user's `PYTHONPATH=src uv run python src/verify_workload.py` run.
+
+- Added `ScheduledRequest`, `Workload`, and `generate_workload()` in
+  `src/distengine/workload.py`. Constant arrivals start at zero with offsets
+  `index / rate_rps`; Poisson arrivals accumulate exponential gaps, including
+  the first gap, using a local seeded random generator.
+- Requests retain immutable prompt tuples, unique IDs within each generated
+  workload, output limits, EOS IDs, and relative arrival offsets.
+- Added version-1 JSON save/load for generation settings, seeds, exact token
+  inputs, and arrival schedules. Loading restores stored arrivals without
+  regenerating them. Validation rejects unsupported schemas, duplicate IDs,
+  invalid request fields, and nonfinite, negative, or decreasing offsets.
+  Equal arrival offsets and empty workloads are supported. Saving validates
+  before replacing an existing file.
+- Added `replay_workload()` against the ordinary/Ray coordinator interface,
+  with a monotonic clock and injectable clock/sleep functions. Replay submits
+  all due requests in order, handles idle gaps, and drains pending work.
+  Blocking coordinator calls may delay actual arrivals; overdue requests are
+  submitted before the next step. Errors propagate without automatic retries
+  or closing caller-owned workers.
+- Added and packaged `src/verify_workload.py`. Checks passed for constant
+  offsets, seeded Poisson gaps, random-state isolation, JSON round trips and
+  invalid files, validation before overwrite, empty replay, idle gaps, tied
+  and overdue arrivals, and final draining.
+- Both arrival modes passed save/load/replay through two ordinary CPU prefill
+  workers and one decode worker. Each mode completed six requests exactly once
+  with outputs matching uncached greedy generation; queues drained and all
+  worker KV blocks were released. Fake-clock tests avoid real arrival delays.
+
+Scope: generation currently repeats one prompt and output limit. Mixed prompt
+lengths and a frozen benchmark workload belong to stage 19. Stage 18 did not
+run GPU/Ray replay verification or measure performance. Actual submission-time
+instrumentation and benchmark metrics remain future work in stage 20.
 
 ## Roadmap
 
@@ -646,7 +684,7 @@ Reproducible arrival workloads and benchmark instrumentation remain stages 18–
 | 15 | Decode-pull admission | Decode pulls a request and KV only when capacity is available. | Complete |
 | 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Complete |
 | 17 | Multiple prefill workers | Independent prefill workers and request queues. | Complete |
-| 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Pending |
+| 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Complete |
 | 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Pending |
 | 20 | Metrics + baseline benchmark | Instrument TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy; save a no-stealing baseline before implementing stealing. | Pending |
 | 21 | Prefill work stealing + initial comparison | Steal unstarted whole requests; add an enable/disable switch; replay the frozen workload in both modes with identical configuration. | Pending |

@@ -383,3 +383,62 @@ request = engine.add_request("example", [10, 20, 30], 8, eos_token_id=2)
 completed = engine.run_until_complete()
 print(completed[0].generated_token_ids)
 ```
+
+## Reproducible workloads (Stage 18)
+
+Run the CPU verification without model downloads or GPUs:
+
+```bash
+PYTHONPATH=src uv run python src/verify_workload.py
+```
+
+This checks constant and seeded Poisson schedules, JSON validation, replay
+timing with a fake clock, and save/load/replay through two small-model prefill
+workers and one decode worker. Both arrival modes verify six exact baseline
+outputs, completion delivery, drained queues, and full KV release.
+
+Generate and save a workload from Python:
+
+```python
+from distengine.workload import (
+    Workload, generate_workload, save_workload, load_workload, replay_workload,
+)
+
+requests = generate_workload(
+    arrival_mode="poisson",  # Or "constant".
+    rate_rps=4.0,
+    num_requests=6,
+    seed=42,
+    prompt_token_ids=[10, 20, 30],  # Example IDs for the small CPU model.
+    max_new_tokens=4,
+    eos_token_id=-1,  # Disable EOS matching for this fixture.
+)
+workload = Workload(
+    schema_version=1, arrival_mode="poisson", rate_rps=4.0,
+    seed=42, requests=tuple(requests),
+)
+save_workload(workload, "workload.json")
+restored = load_workload("workload.json")
+assert restored == workload
+
+# With a fresh MultiPrefillCoordinator or MultiPrefillRayCoordinator:
+# results = replay_workload(restored, coordinator)
+```
+
+Use actual tokenizer-produced IDs and EOS for checkpoint runs. Constant traffic
+starts at zero; Poisson traffic starts after the first sampled exponential gap.
+Offsets are seconds relative to replay start. JSON stores the exact tokens and
+schedule alongside the seed and settings; loading does not regenerate arrivals.
+Saving replaces an existing destination after validating the workload.
+
+Replay requires an exclusively owned coordinator with no pending work; use a
+fresh coordinator for each run because request IDs remain reserved. It submits
+due requests in schedule order and drains inference before returning completion
+dictionaries. Its monotonic clock and sleep function can be injected for tests.
+Coordinator calls block, so actual submissions can be late; overdue arrivals
+are submitted before the next inference step. Exceptions propagate, and the
+caller remains responsible for worker cleanup.
+
+Stage 18 establishes CPU correctness. GPU/Ray replay and performance measurement
+are unverified; mixed prompt lengths follow in stage 19, with timing metrics
+and baseline benchmarking in stage 20.
