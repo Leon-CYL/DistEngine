@@ -27,6 +27,8 @@ htmlcov/
 checkpoints/
 artifacts/
 results/
+/src/workloads/
+/workloads/
 *.log
 
 # Keep uv.lock tracked for reproducible dependency resolution.
