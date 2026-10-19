@@ -623,7 +623,7 @@ Scope: fixed source assignment with no stealing, one decode worker, serial drive
 ticks with concurrent prefill dispatch, unbatched decode, in-memory queues, and
 explicit retries. These are correctness checks, not performance measurements.
 Stage 18 adds reproducible arrival workloads; mixed workloads and benchmark
-instrumentation remain stages 19–20.
+instrumentation are covered in stages 19 and 21, respectively.
 
 ## Stage 18 — Workload generator
 
@@ -657,10 +657,121 @@ the user's `PYTHONPATH=src uv run python src/verify_workload.py` run.
   with outputs matching uncached greedy generation; queues drained and all
   worker KV blocks were released. Fake-clock tests avoid real arrival delays.
 
-Scope: generation currently repeats one prompt and output limit. Mixed prompt
-lengths and a frozen benchmark workload belong to stage 19. Stage 18 did not
+Scope: the stage 18 generator repeats one prompt and output limit. Mixed prompt
+lengths and a frozen benchmark workload are added in stage 19. Stage 18 did not
 run GPU/Ray replay verification or measure performance. Actual submission-time
-instrumentation and benchmark metrics remain future work in stage 20.
+instrumentation and benchmark metrics remain future work in stage 21.
+
+## Stage 19 — Mixed request workload
+
+Status: complete; frozen TinyLlama-tokenized inputs, CPU correctness checks,
+and cached pinned-tokenizer regeneration passed on October 18, 2026.
+
+- Added `src/distengine/mixed_workload.py` with `Prompt` records and
+  `generate_mixed_workload()`. Exact class counts use largest-remainder quotas,
+  followed by a seeded shuffle and uniform selection within each class.
+  Arrival and prompt-selection randomness use independent seeds; changing
+  prompt selection preserves arrival offsets. Validation checks prompt IDs,
+  weights, vocabulary, EOS, model context, and per-worker KV capacity.
+- Added `src/freeze_workload.py` to construct nine prompts across three topics
+  and length classes using TinyLlama's pinned chat template and tokenizer.
+  Source paragraphs are repeated to reach the target class without truncating
+  token sequences. Measured lengths include the chat template:
+  short 53–64 tokens, medium 137–160, and long 520–529.
+- Froze `workloads/stage19/mixed-v1.json`: 100 Poisson arrivals at an intended
+  average 2 requests/second, arrival seed 42, prompt seed 19, exact class counts
+  60 short / 30 medium / 10 long, and a fixed 32-token output limit with normal
+  EOS stopping. The companion prompt bank saves source text and exact tokens.
+- `workloads/stage19/manifest.json` records tokenizer/model revision, chat
+  template, settings, per-request prompt identity, class counts, SHA-256 hashes,
+  and round-robin prompt-token totals. For two sources the totals are 6,404 and
+  6,751 tokens (maximum/minimum ratio about 1.054); this is modest input imbalance,
+  not a measured runtime imbalance or evidence of a stealing speedup.
+- Pinned model/tokenizer revision is
+  `fe8a4ea1ffedaf415f4da2f062534de366a451e6`. The workload is validated against
+  a 32,000-token vocabulary, 2,048-token model context, and 1,024 KV token slots
+  per worker (for example, 64 blocks of 16). Later benchmarks must configure
+  sufficient capacity on every worker; output length can end early at EOS.
+- Added and packaged `verify_mixed_workload.py` and the freeze helper. Verification
+  passed frozen-file checksums, quotas, seed independence, invalid settings,
+  context/KV rejection, and small/empty workload counts. All nine prompt lengths
+  passed save/load/replay on two prefill CPU workers and one decode worker,
+  with exact greedy baseline outputs and full KV cleanup. This fixture maps
+  token IDs into a 64-token small-model vocabulary and uses four output tokens;
+  it does not claim TinyLlama output verification for the frozen 100 requests.
+- Cached pinned-tokenizer retokenization reproduced every bank entry, and
+  rebuilding the artifacts produced byte-identical files. The stage 18 CPU
+  suite remains the regression check for ordinary workload generation/replay.
+
+Run `PYTHONPATH=src uv run python src/verify_mixed_workload.py`; add `--tokenizer`
+for cached tokenizer and byte-rebuild checks. The freeze CLI refuses to overwrite
+a nonempty directory. Frozen inputs should remain unchanged across comparisons.
+Stage 21 still needs benchmark instrumentation, warm-up/rate selection, and
+GPU baseline measurements. No stage 19 GPU performance run was performed.
+
+## Stage 20 — Multiple decode workers
+
+Status: complete; local ordinary/Ray CPU checks and the four-GPU pinned
+TinyLlama checkpoint passed on October 18, 2026 (Pacific time).
+The roadmap is numbered in execution order: 19 → 20 → 21 → 22 → 23 → 24 → 25.
+Existing reports retain their original filenames and stage IDs;
+`results/stage22-multi-decode.json` records the checkpoint now documented as stage 20.
+
+- Added `MultiDecodeCoordinator` and `MultiDecodeRayCoordinator` for multiple
+  prefill sources and decode targets. Prefill submission stays round-robin.
+  Rotating target/source pull priority chooses an eligible decoder at KV
+  admission; `decode_assignments` retains that request's fixed decode owner.
+  Requests finishing in prefill have no decode assignment.
+- Each target has an independent round-robin active queue and advances at most
+  one request per tick. Each target can admit at most one held request per tick.
+  A full target does not prevent another target from pulling; holding pools
+  and upstream queues retain the existing backpressure behavior.
+- Ray dispatches eligible decode calls across targets before waiting for their
+  results, and reconciles every dispatched result before propagating the first
+  error. Successful completions remain buffered if a peer or later phase fails.
+  Existing concurrent prefill dispatch is reused.
+- Successful imports are recorded before source release. A release failure
+  retains explicit pending-release state, preventing a duplicate import; a
+  subsequent caller tick reconciles source release. Import failures retain
+  source ownership. Unreachable actors and unknown remote outcomes still need
+  caller intervention; no durable recovery or exactly-once transport is claimed.
+- Constructors require distinct, fresh, open workers/actors with correct roles.
+  Ordinary workers must have independent KV storage. Submission validation
+  checks the assigned source and every decode target before mutating queues;
+  requests must fit every target individually. Compatible immutable models
+  remain a requirement of KV transfer.
+- The original single-decode coordinators remain supported. Only their target
+  validation hook is extended so the new coordinators can validate all targets.
+- Added `verify_multi_decode.py`, `verify_multi_decode_ray.py`,
+  `verify_gpu_multi_decode.py`, and `src/Modal/run_multi_decode.py`; standalone
+  verification modules are included in wheel packaging.
+- Local CPU checks passed guards, placement, full-target bypass, import retry,
+  tracking after source-release failure, decode-peer failure reconciliation,
+  per-target rotation, workload replay, output agreement and unfinished cleanup.
+  Deferred Ray checks verify dispatch before waiting and successful-peer
+  reconciliation. Real Ray checks passed four-process isolation, ownership on
+  every tick, both decode actors progressing, pressure, exact outputs and cleanup.
+- Stage 18 workload, stage 19 mixed workload, and CPU backpressure regressions
+  passed. The four-T4 checkpoint runs ordinary/Ray CPU checks before testing
+  pinned TinyLlama GPU placement, transfers, outputs, ownership and cleanup.
+- `modal run src/Modal/run_multi_decode.py` passed on four Tesla T4 GPUs in
+  separate actor processes: two prefill actors and two decode actors with
+  disjoint Ray GPU assignments. Each actor saw one CUDA GPU, with model and KV
+  on `cuda:0`. Python 3.11.12, PyTorch 2.14.1+cu130, and Ray 2.59.0 were used.
+- Pinned TinyLlama float32 revision
+  `fe8a4ea1ffedaf415f4da2f062534de366a451e6` produced all eight outputs exactly
+  matching uncached CUDA generation in 94 ticks: three factual outputs of
+  8 tokens, three explanation outputs of 32 tokens, and two completion outputs
+  of 21 tokens. Both decoders progressed, ownership was checked on every tick,
+  and queues drained. Closing all four actors with unfinished held and decode
+  requests released all KV blocks.
+- Report: `results/stage22-multi-decode.json`.
+  Modal run: https://modal.com/apps/leonlin0106/main/ap-NbBOXUQlY4Snh7KF5bH8w9
+  Remote logs use October 19 UTC; the run completed October 18 Pacific time.
+
+Scope: one request per decode worker per tick, no batching, migration or stealing,
+driver-controlled admission, and in-memory state. Performance instrumentation
+and a baseline on this expanded worker topology remain stage 21.
 
 ## Roadmap
 
@@ -685,10 +796,10 @@ instrumentation and benchmark metrics remain future work in stage 20.
 | 16 | Backpressure | Stop prefill admission when the holding pool is full; queue upstream. | Complete |
 | 17 | Multiple prefill workers | Independent prefill workers and request queues. | Complete |
 | 18 | Workload generator | Constant and Poisson arrivals; save reproducible request inputs, arrival schedules, and seeds for replay. | Complete |
-| 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Pending |
-| 20 | Metrics + baseline benchmark | Instrument TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy; save a no-stealing baseline before implementing stealing. | Pending |
-| 21 | Prefill work stealing + initial comparison | Steal unstarted whole requests; add an enable/disable switch; replay the frozen workload in both modes with identical configuration. | Pending |
-| 22 | Multiple decode workers | Simple placement; keep each request on its assigned decode worker. | Pending |
+| 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Complete |
+| 20 | Multiple decode workers | Simple placement; keep each request on its assigned decode worker. | Complete |
+| 21 | Metrics + baseline benchmark | Instrument TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy; save a no-stealing baseline before implementing stealing. | Pending |
+| 22 | Prefill work stealing + initial comparison | Steal unstarted whole requests; add an enable/disable switch; replay the frozen workload in both modes with identical configuration. | Pending |
 | 23 | Modal deployment | Start with one prefill GPU and one decode GPU; scale as necessary. | Pending |
 | 24 | Final benchmark | Repeat the controlled stealing-disabled/enabled comparison on the final system; analyze performance and correctness against the saved baseline. | Pending |
 | 25 | Cleanup + report | Simplify code; document architecture, results, limitations, and RDMA/FlashInfer/TP future work. | Pending |
@@ -707,19 +818,24 @@ instrumentation and benchmark metrics remain future work in stage 20.
   `uv run modal run src/Modal/run_multi_prefill.py`: multiple prefill actors,
   independent queues and holding pools, mixed-prompt output agreement, and
   cleanup passed. Report: `results/stage17-multi-prefill.json`.
-- Repeat GPU correctness checks after scheduling changes in stage 21 and
-  decode-worker expansion in stage 22, and before the final stage 24 benchmark.
+- Stage 20 four-GPU checkpoint completed on October 18, 2026, before stage 21,
+  using `modal run src/Modal/run_multi_decode.py`: two prefill/two decode actors,
+  fixed ownership, all eight CUDA baseline outputs, pressure and cleanup passed.
+  Report: `results/stage22-multi-decode.json`.
+- Repeat GPU correctness checks after scheduling changes in stage 22 and
+  decode-worker expansion in stage 20, and before the final stage 24 benchmark.
 
 ## Benchmark checkpoints
 
-- Stage 20 establishes the baseline before stealing is implemented, using the
-  multiple-prefill-worker system from stage 17 and the workloads from stages
-  18–19. Save raw measurements, workload inputs, and system configuration.
-- Stage 21 performs the first comparison after implementing stealing. Run both
+- Stage 20 is now executed before stage 21 so the first benchmark already uses
+  multiple decode workers. Stage 21 establishes the baseline before stealing is
+  implemented, using stages 17 and 20 worker orchestration and the frozen inputs
+  from stages 18–19. Save raw measurements, workload inputs, and configuration.
+- Stage 22 performs the first comparison after implementing stealing. Run both
   disabled and enabled modes on the same code revision and configuration;
   retain the earlier baseline to detect unrelated regressions.
 - Stage 24 repeats both modes on the final deployed system. If hardware, worker
-  counts, or deployment changes after stage 21, capture a fresh disabled baseline
+  counts, or deployment changes after stage 22, capture a fresh disabled baseline
   on that system before comparing it with enabled stealing.
 
 For each comparison, keep model revision, dtype, worker counts, hardware, queue

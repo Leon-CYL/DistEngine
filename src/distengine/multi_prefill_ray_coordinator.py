@@ -50,7 +50,7 @@ class MultiPrefillRayCoordinator:
     ) -> None:
         """Validate and enqueue a copied submission without allocating KV."""
         self._check_open()
-        metadata = (self._metadata[self.next_submit], self._metadata[-1])
+        metadata = (self._metadata[self.next_submit], *self._submission_targets())
 
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("request_id must be a nonempty string")
@@ -89,6 +89,9 @@ class MultiPrefillRayCoordinator:
         self.waiting[self.next_submit].append(submission)
         self.seen_ids.add(request_id)
         self.next_submit = (self.next_submit + 1) % len(self.sources)
+
+    def _submission_targets(self):
+        return (self._metadata[-1],)
 
     def _decode_one(self) -> dict | None:
         if not self.decode_ready:

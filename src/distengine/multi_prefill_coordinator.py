@@ -73,12 +73,12 @@ class MultiPrefillCoordinator:
             if type(token_id) is not int:
                 raise ValueError("Token IDs must be integers")
 
-            for worker in (source, self.target):
+            for worker in (source, *self._submission_targets()):
                 if not 0 <= token_id < worker.runner.model.config.vocab_size:
                     raise ValueError("Token ID is outside the model vocabulary")
 
         maximum = len(prompt_token_ids) + max_new_tokens - 1
-        for worker in (source, self.target):
+        for worker in (source, *self._submission_targets()):
             manager = worker.runner.block_manager
             if maximum > manager.num_blocks * manager.block_size:
                 raise ValueError("Request exceeds worker KV capacity")
@@ -92,6 +92,9 @@ class MultiPrefillCoordinator:
         self.waiting[self.next_submit].append(submission)
         self.seen_ids.add(request_id)
         self.next_submit = (self.next_submit + 1) % len(self.sources)
+
+    def _submission_targets(self):
+        return (self.target,)
 
     def _decode_one(self) -> dict | None:
         if not self.decode_ready:

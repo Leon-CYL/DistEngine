@@ -1,0 +1,549 @@
+{
+  "schema_version": 1,
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "tokenizer_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "revision": "fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+  "chat_template": "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}",
+  "settings": {
+    "arrival_mode": "poisson",
+    "rate_rps": 2.0,
+    "num_requests": 100,
+    "arrival_seed": 42,
+    "prompt_seed": 19,
+    "class_weights": {
+      "short": 0.6,
+      "medium": 0.3,
+      "long": 0.1
+    },
+    "max_new_tokens": 32,
+    "eos_token_id": 2,
+    "vocab_size": 32000,
+    "max_context_tokens": 2048,
+    "kv_capacity_tokens": 1024
+  },
+  "selection": "largest-remainder quotas; seeded shuffle; uniform prompt choice",
+  "prompt_bank": {
+    "file": "prompt-bank.json",
+    "sha256": "678ae4eb3be08a652dd1eebd1d0c4a3513b39e9803753a2346e0c19b74f85eac"
+  },
+  "workload": {
+    "file": "mixed-v1.json",
+    "sha256": "11613c5f1f1b78367c5257a89dc99f17a0147bd56dbd1e316069340ebd83c0d2"
+  },
+  "class_counts": {
+    "long": 10,
+    "medium": 30,
+    "short": 60
+  },
+  "request_prompts": [
+    {
+      "request_id": "request-000000",
+      "prompt_id": "long-garden",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000001",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000002",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000003",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000004",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000005",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000006",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000007",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000008",
+      "prompt_id": "medium-library",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000009",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000010",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000011",
+      "prompt_id": "long-cycling",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000012",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000013",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000014",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000015",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000016",
+      "prompt_id": "long-library",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000017",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000018",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000019",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000020",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000021",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000022",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000023",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000024",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000025",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000026",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000027",
+      "prompt_id": "medium-library",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000028",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000029",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000030",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000031",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000032",
+      "prompt_id": "long-cycling",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000033",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000034",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000035",
+      "prompt_id": "long-library",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000036",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000037",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000038",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000039",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000040",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000041",
+      "prompt_id": "long-cycling",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000042",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000043",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000044",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000045",
+      "prompt_id": "long-library",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000046",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000047",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000048",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000049",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000050",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000051",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000052",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000053",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000054",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000055",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000056",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000057",
+      "prompt_id": "medium-library",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000058",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000059",
+      "prompt_id": "medium-library",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000060",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000061",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000062",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000063",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000064",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000065",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000066",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000067",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000068",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000069",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000070",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000071",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000072",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000073",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000074",
+      "prompt_id": "long-library",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000075",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000076",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000077",
+      "prompt_id": "long-cycling",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000078",
+      "prompt_id": "medium-library",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000079",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000080",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000081",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000082",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000083",
+      "prompt_id": "short-garden",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000084",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000085",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000086",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000087",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000088",
+      "prompt_id": "medium-garden",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000089",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000090",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000091",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000092",
+      "prompt_id": "short-cycling",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000093",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000094",
+      "prompt_id": "medium-cycling",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000095",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000096",
+      "prompt_id": "medium-library",
+      "length_class": "medium"
+    },
+    {
+      "request_id": "request-000097",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    },
+    {
+      "request_id": "request-000098",
+      "prompt_id": "long-garden",
+      "length_class": "long"
+    },
+    {
+      "request_id": "request-000099",
+      "prompt_id": "short-library",
+      "length_class": "short"
+    }
+  ],
+  "round_robin": {
+    "num_prefill_workers": 2,
+    "prompt_tokens_per_source": [
+      6404,
+      6751
+    ],
+    "max_to_min_ratio": 1.0541848844472206
+  },
+  "capacity_note": "Each worker needs at least 1024 KV token slots (e.g. 64 blocks of 16); this is not a throughput recommendation."
+}

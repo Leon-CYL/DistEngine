@@ -442,3 +442,120 @@ caller remains responsible for worker cleanup.
 Stage 18 establishes CPU correctness. GPU/Ray replay and performance measurement
 are unverified; mixed prompt lengths follow in stage 19, with timing metrics
 and baseline benchmarking in stage 20.
+
+## Mixed prompt workload (Stage 19)
+
+The frozen benchmark input is `workloads/stage19/mixed-v1.json`. It contains
+100 requests with exact counts of 60 short, 30 medium, and 10 long prompts,
+Poisson arrivals at an intended average 2 RPS, and a 32-token output limit.
+EOS may finish requests earlier. Nine prompts use three topics with repeated
+context paragraphs; measured lengths after the pinned TinyLlama chat template
+are 53–64, 137–160, and 520–529 tokens respectively.
+
+`prompt-bank.json` saves source text and token IDs. `manifest.json` records
+model/tokenizer revision, both seeds, selection settings, request-to-prompt
+mapping, SHA-256 hashes, and round-robin token totals. For two prefill sources,
+those totals are 6,404 and 6,751: a modest 5.4% difference in input tokens.
+Runtime imbalance and performance benefits remain unmeasured.
+
+Run the verification from the repository root:
+
+```bash
+PYTHONPATH=src uv run python src/verify_mixed_workload.py
+# Also verify cached pinned-tokenizer outputs and byte-identical rebuilding:
+PYTHONPATH=src uv run python src/verify_mixed_workload.py --tokenizer
+```
+
+The default checks need no model download or GPU. CPU inference checks use a
+small model with token IDs mapped into its vocabulary while preserving all nine
+prompt lengths; they do not run the 100-request TinyLlama benchmark. The optional
+check requires the pinned tokenizer to be cached locally.
+
+To reproduce the frozen files in a new directory:
+
+```bash
+PYTHONPATH=src uv run python src/freeze_workload.py \
+  --output /tmp/distengine-stage19-rebuild --local-files-only
+```
+
+The destination must be empty. Omit `--local-files-only` to permit a tokenizer
+download. The helper uses the pinned revision, fixed settings, and independent
+arrival/selection seeds. Class quotas use largest-remainder rounding, then a
+seeded shuffle; prompt choice within each class is uniform. The library API is
+`distengine.mixed_workload.generate_mixed_workload()` for other configurations.
+
+Replay the saved file with `load_workload()` and `replay_workload()` as in stage
+18. Configure every worker with at least 1,024 KV token slots (for example,
+`num_blocks=64, block_size=16`) to match the manifest's capacity validation.
+Keep the frozen request order and file checksums identical across comparisons.
+Stage 20 will determine suitable offered rates and collect the GPU baseline;
+the frozen 2 RPS setting is an experimental input, not a capacity estimate.
+
+## Multiple decode workers (Stage 22, moved before Stage 20)
+
+Stage 22 now precedes baseline benchmarking. Stage numbers are preserved;
+execution continues 19 → 22 → 20 → 21. The baseline and later stealing comparison
+must use the same prefill/decode worker counts and capacity settings.
+
+```python
+from distengine.multi_decode_coordinator import MultiDecodeCoordinator
+from distengine.multi_decode_ray_coordinator import MultiDecodeRayCoordinator
+
+# Each list contains fresh, independent workers (or Ray actor handles).
+# coordinator = MultiDecodeCoordinator(prefill_workers, decode_workers)
+# coordinator = MultiDecodeRayCoordinator(prefill_actors, decode_actors)
+# results = replay_workload(load_workload("workloads/stage19/mixed-v1.json"), coordinator)
+```
+
+Submission remains round-robin across prefill workers. Decode placement happens
+when held KV can be admitted: the driver rotates target/source priority and
+checks each target independently. A full target does not block another target.
+After import, the request stays on its assigned decoder until it finishes;
+`coordinator.decode_assignments` records this placement. Prefill-only completions
+have no decode assignment. Each `decode_ready[index]` is a target's round-robin
+queue. Each tick advances one request per nonempty target and admits at most
+one new request per target. Ray decode calls are dispatched across actors before
+waiting, and concurrent prefill dispatch is preserved.
+
+Every submitted request must fit the assigned source and every target. Models
+must remain compatible and immutable. Source KV stays owned until import is
+acknowledged. Pending source releases are tracked before release can fail, so a
+later caller tick can reconcile without importing twice. Exceptions propagate;
+completions from successful peers can be recovered with `drain_completed()`.
+Unknown actor outcomes require caller intervention. The caller owns worker
+cleanup; closing workers releases unfinished KV. Existing single-decode
+coordinators remain available.
+
+Run the ordinary-worker suite and the real four-process Ray CPU suite:
+
+```bash
+PYTHONPATH=src uv run python src/verify_multi_decode.py
+PYTHONPATH=src uv run python src/verify_multi_decode_ray.py
+```
+
+The ordinary suite includes capacity guards, failure recovery, dispatch-order
+checks, per-target fairness, workload replay and exact small-model output checks.
+Ray checks inspect ownership every tick, both decoders progressing, holding and
+upstream pressure, complete output agreement, and unfinished-request cleanup.
+
+Run the four-GPU correctness checkpoint on Modal (GPU charges apply):
+
+```bash
+modal run src/Modal/run_multi_decode.py
+# Optional small-model GPU checkpoint:
+modal run src/Modal/run_multi_decode.py --no-checkpoint \
+  --output results/stage22-small-multi-decode.json
+```
+
+This uses two prefill and two decode actors on four distinct T4s. It runs CPU
+checks first, then compares eight transferred requests with uncached CUDA
+baselines, verifies fixed decode ownership and GPU placement, and closes
+unfinished work. Successful runs save `results/stage22-multi-decode.json`.
+This checkpoint uses short reference prompts; the frozen stage 19 workload
+still requires 1,024 KV token slots per worker when used for benchmarking.
+No performance claim is made by these correctness checks.
+
+Verified on October 18, 2026: ordinary CPU, real four-process Ray CPU, and pinned
+TinyLlama float32 on four Tesla T4s all passed. Eight GPU outputs matched
+uncached generation in 94 ticks, with fixed ownership and full cleanup.
+The saved report is `results/stage22-multi-decode.json`.
