@@ -119,14 +119,6 @@ TinyLlama-1.1B, two prefill + two decode A100-80GB GPUs; 200 Poisson requests at
 Goodput counts requests meeting all three limits: first token ≤ 2 s, time per output token ≤ 100 ms, and end-to-end latency ≤ 10 s. Both policies completed without failed requests and released all KV cache.
 
 
-## Limitations and future work
-
-KV transfer currently passes through CPU memory, and decode gathers KV for dense
-attention. Future work includes direct GPU transfers with RDMA, optimized
-attention kernels such as FlashInfer, and tensor parallelism for larger models.
-The benchmark measures the selected 5-RPS workload rather than maximum capacity.
-Implementation history and measurement caveats are recorded in [PROGRESS.md](PROGRESS.md).
-
 
 ## References
 
