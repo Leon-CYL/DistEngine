@@ -65,10 +65,48 @@ def actor_info(worker) -> dict:
     if device.type == "cuda":
         info["visible_gpu_count"] = torch.cuda.device_count()
         info["gpu_name"] = torch.cuda.get_device_name(0)
+        info["gpu_memory_bytes"] = torch.cuda.get_device_properties(0).total_memory
     return info
 
 
-class PrefillActorImpl:
+def scheduled_state(worker):
+    """State returned with an operation, avoiding RPCs behind a busy actor."""
+    state = worker.telemetry()
+    if isinstance(worker, PrefillWorker):
+        state["max_held_requests"] = worker.prefill_pool._max_held_requests
+        state["held_descriptors"] = [
+            {"request_id": rid, "num_prompt_tokens": worker.requests[rid].num_prompt_tokens,
+             "max_new_tokens": worker.requests[rid].max_new_tokens}
+            for rid in worker.prefill_pool.request_ids()
+        ]
+    return state
+
+
+class ScheduledActorMethods:
+    @ray.method
+    def scheduled_state(self):
+        return scheduled_state(self.worker)
+
+    @ray.method
+    def scheduled(self, operation, *args, **kwargs):
+        allowed = {"prefill", "step", "step_batch", "export_request", "import_request", "release"}
+        if operation not in allowed:
+            raise ValueError("Unknown scheduled worker operation")
+        try:
+            result = getattr(self.worker, operation)(*args, **kwargs)
+        except Exception as exc:
+            return {"result": None, "error": exc, "state": scheduled_state(self.worker)}
+        return {"result": result, "error": None, "state": scheduled_state(self.worker)}
+
+    @ray.method
+    def scheduled_import(self, exported):
+        # Ray resolves the export reference in this actor, never in the driver.
+        if exported["error"] is not None:
+            return {"result": None, "error": exported["error"], "state": scheduled_state(self.worker)}
+        return self.scheduled("import_request", exported["result"], reserve_full=True)
+
+
+class PrefillActorImpl(ScheduledActorMethods):
     def __init__(
         self,
         num_blocks: int = 8,
@@ -133,7 +171,7 @@ class PrefillActorImpl:
         self.worker.close()
 
 
-class DecodeActorImpl:
+class DecodeActorImpl(ScheduledActorMethods):
     def __init__(
         self,
         num_blocks: int = 8,
@@ -194,6 +232,10 @@ class DecodeActorImpl:
             num_prompt_tokens,
             max_new_tokens,
         )
+
+    @ray.method
+    def step_batch(self, request_ids):
+        return self.worker.step_batch(request_ids)
 
     @ray.method
     def step(self, request_id: str) -> dict:

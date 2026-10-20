@@ -7,7 +7,7 @@ from layers.activation import SiluAndMul
 from layers.attention import LlamaAttention
 from layers.layernorm import RMSNorm
 from layers.linear import Linear
-from distengine.paged_kv_cache import PagedKVCache
+from distengine.paged_kv_cache import PagedKVCache, BatchedPagedKVCache
 
 
 class LlamaMLP(nn.Module):
@@ -67,7 +67,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        cache: PagedKVCache | None = None,
+        cache: PagedKVCache | BatchedPagedKVCache | None = None,
         layer_index: int = 0,
     ) -> torch.Tensor:
         
@@ -130,14 +130,15 @@ class LlamaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
-        cache: PagedKVCache | None = None,
+        cache: PagedKVCache | BatchedPagedKVCache | None = None,
     ) -> torch.Tensor:
         
         batch_size, sequence_length = input_ids.shape
 
         past_length = 0
 
-        if cache is not None:
+        batched_cache = isinstance(cache, BatchedPagedKVCache)
+        if cache is not None and not batched_cache:
             if batch_size != 1:
                 raise ValueError("Cached inference supports batch size one")
 
@@ -155,6 +156,11 @@ class LlamaModel(nn.Module):
             device=input_ids.device,
             dtype=torch.long,
         ).unsqueeze(0).expand(batch_size, -1)
+
+        if batched_cache:
+            if sequence_length != 1 or batch_size != len(cache.caches) or cache.num_layers != len(self.layers):
+                raise ValueError("Invalid decode batch shape or layer count")
+            expected_positions = torch.tensor(cache.lengths, device=input_ids.device).unsqueeze(1)
 
         if positions is None:
             positions = expected_positions
@@ -191,7 +197,7 @@ class LlamaForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
-        cache: PagedKVCache | None = None,
+        cache: PagedKVCache | BatchedPagedKVCache | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,

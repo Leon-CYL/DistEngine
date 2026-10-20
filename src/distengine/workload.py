@@ -223,6 +223,7 @@ def replay_workload(
     sleep: Callable[[float], None] = time.sleep,
     metrics: MetricsRecorder | None = None,
     sample: Callable[[], None] | None = None,
+    deadline: float | None = None,
 ) -> list[dict]:
     """Submit scheduled arrivals and drain a fresh, exclusively owned coordinator.
 
@@ -232,11 +233,15 @@ def replay_workload(
     Errors propagate without retrying submissions or closing caller-owned workers.
     Injected clocks must be monotonic, and sleep must advance or wait on that clock.
     An optional recorder must be shared with the coordinator. Its clock and
-    origin define replay time, and successful draining freezes its report window.
+    origin define replay time, and return freezes its report window. An optional
+    absolute deadline stops between blocking calls and may leave pending work;
+    the caller must close workers. It cannot interrupt an in-flight model/Ray call.
     """
     if not isinstance(workload, Workload):
         raise ValueError("workload must be a Workload")
     # Validate before submitting anything, including directly constructed data.
+    if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+        raise ValueError("deadline must be a finite clock timestamp")
     workload = _workload_from_dict(asdict(workload))
     if coordinator.has_pending():
         raise ValueError("Replay requires a coordinator with no pending work")
@@ -257,8 +262,12 @@ def replay_workload(
     completed = []
     start = clock() if metrics is None else metrics.started_at
     while next_request < len(workload.requests) or coordinator.has_pending():
+        if deadline is not None and clock() >= deadline:
+            break
         while next_request < len(workload.requests):
             request = workload.requests[next_request]
+            if deadline is not None and clock() >= deadline:
+                break
             if request.arrival_offset_s > clock() - start:
                 break
             if metrics is not None:
@@ -277,6 +286,8 @@ def replay_workload(
         if sample is not None:
             sample()
 
+        if deadline is not None and clock() >= deadline:
+            break
         if coordinator.has_pending():
             try:
                 completed.extend(coordinator.step())
@@ -286,6 +297,8 @@ def replay_workload(
                 raise
         elif next_request < len(workload.requests):
             remaining = workload.requests[next_request].arrival_offset_s - (clock() - start)
+            if deadline is not None:
+                remaining = min(remaining, max(0.0, deadline - clock()))
             if remaining > 0:
                 sleep(remaining)
 

@@ -63,6 +63,7 @@ class _WorkerBase:
         self._ensure_open()
         self._sync_measurement()
         self.activity = WorkerActivity()
+        self.decode_batch_sizes = {}
 
     def telemetry(self, stop=False):
         if stop and self.activity is not None and self.activity.stopped is None:
@@ -73,6 +74,7 @@ class _WorkerBase:
         info["kv_blocks_used"] = info["num_blocks"] - info["num_free_blocks"]
         info["kv_occupancy_fraction"] = info["kv_blocks_used"] / info["num_blocks"]
         info["activity"] = self.activity.report() if self.activity is not None else None
+        info["decode_batch_sizes"] = dict(getattr(self, "decode_batch_sizes", {}))
         return info
 
     @measured("release")
@@ -265,6 +267,26 @@ class DecodeWorker(_WorkerBase):
         self.requests[request.request_id] = request
         return self._snapshot(request)
 
+    @measured("step_batch")
+    def step_batch(self, request_ids: list[str]) -> list[dict]:
+        self._ensure_open()
+        requests = [self.requests[request_id] for request_id in request_ids]
+        try:
+            self.runner.decode_batch(requests)
+        except Exception:
+            for request in requests:
+                if request.request_id not in self.runner.caches:
+                    self.requests.pop(request.request_id, None)
+            raise
+        if self.activity is not None:
+            size = len(requests)
+            self.decode_batch_sizes[size] = self.decode_batch_sizes.get(size, 0) + 1
+        results = [self._snapshot(request) for request in requests]
+        for request in requests:
+            if request.is_finished:
+                self.release(request.request_id)
+        return results
+
     @measured("step")
     def step(self, request_id: str) -> dict:
         self._ensure_open()
@@ -282,6 +304,8 @@ class DecodeWorker(_WorkerBase):
                 del self.requests[request_id]
             raise
 
+        if self.activity is not None:
+            self.decode_batch_sizes[1] = self.decode_batch_sizes.get(1, 0) + 1
         result = self._snapshot(request)
 
         if request.is_finished:

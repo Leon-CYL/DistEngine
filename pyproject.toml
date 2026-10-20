@@ -53,3 +53,7 @@ packages = ["src/distengine", "src/models", "src/layers"]
 "src/benchmark_stage21.py" = "benchmark_stage21.py"
 "src/verify_system_metrics.py" = "verify_system_metrics.py"
 "src/benchmark_io.py" = "benchmark_io.py"
+"src/verify_decode_batch.py" = "verify_decode_batch.py"
+"src/verify_independent.py" = "verify_independent.py"
+"src/verify_work_stealing.py" = "verify_work_stealing.py"
+"src/verify_paired.py" = "verify_paired.py"

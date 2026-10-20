@@ -7,7 +7,10 @@ from .multi_prefill_ray_coordinator import MultiPrefillRayCoordinator
 
 
 class MultiDecodeRayCoordinator(_MultiDecodeScheduling, MultiPrefillRayCoordinator):
-    def __init__(self, sources, targets, *, metrics=None):
+    def __init__(self, sources, targets, *, metrics=None, decode_batch_size=1):
+        if type(decode_batch_size) is not int or decode_batch_size <= 0:
+            raise ValueError("decode_batch_size must be a positive integer")
+        self.decode_batch_size = decode_batch_size
         sources = list(sources)
         self.targets = list(targets)
         if not self.targets:
@@ -67,24 +70,28 @@ class MultiDecodeRayCoordinator(_MultiDecodeScheduling, MultiPrefillRayCoordinat
         for index, target in enumerate(self.targets):
             if not self.decode_ready[index]:
                 continue
-            request_id = self.decode_ready[index][0]
+            ids = list(self.decode_ready[index])[:self.decode_batch_size]
             try:
-                ref = target.step.remote(request_id)
-                pending[ref] = (index, request_id)
+                ref = (target.step.remote(ids[0]) if self.decode_batch_size == 1
+                       else target.step_batch.remote(ids))
+                pending[ref] = (index, ids)
             except Exception as exc:
-                dispatch_errors.append((index, request_id, None, exc))
+                dispatch_errors.extend((index, request_id, None, exc) for request_id in ids)
         # Dispatch all actors before waiting; observe results as they are ready.
         yield from dispatch_errors
         while pending:
             ready, _ = ray.wait(list(pending), num_returns=1)
             ref = ready[0]
-            index, request_id = pending.pop(ref)
+            index, ids = pending.pop(ref)
             try:
                 result = ray.get(ref)
+                results = [result] if self.decode_batch_size == 1 else result
             except Exception as exc:
-                yield index, request_id, None, exc
+                for request_id in ids:
+                    yield index, request_id, None, exc
             else:
-                yield index, request_id, result, None
+                for request_id, result in zip(ids, results):
+                    yield index, request_id, result, None
 
     def _prefill_all(self):
         self._prefill_sources()

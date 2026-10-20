@@ -1,7 +1,7 @@
 import torch
 
 from layers.sampler import GreedySampler
-from .paged_kv_cache import KVStorage, PagedKVCache
+from .paged_kv_cache import KVStorage, PagedKVCache, BatchedPagedKVCache
 from models.llama import LlamaForCausalLM
 from .block_manager import BlockManager
 from .request import Request, RequestStatus
@@ -226,6 +226,47 @@ class ModelRunner:
             self.block_manager.free(request.request_id)
             raise
 
+
+    @torch.inference_mode()
+    def decode_batch(self, requests: list[Request]) -> list[int]:
+        requests = list(requests)
+        if not requests:
+            raise ValueError("A decode batch must not be empty")
+        for request in requests:
+            self._validate_request(request)
+        ids = [r.request_id for r in requests]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Duplicate request in decode batch")
+        caches = []
+        additional = 0
+        manager = self.block_manager
+        for request in requests:
+            cache = self.caches[request.request_id]
+            if request.status != RequestStatus.RUNNING or not request.num_generated_tokens:
+                raise ValueError("Decode requires an active generated token")
+            if cache.sequence_length != len(request.token_ids) - 1:
+                raise ValueError("Request tokens and cache length are inconsistent")
+            additional += max(0, manager._required_blocks(cache.sequence_length + 1)
+                              - len(manager.get_block_table(request.request_id)))
+            caches.append(cache)
+        # Preflight the whole batch before changing block ownership or KV contents.
+        if additional > manager.num_free_blocks:
+            raise RuntimeError("Not enough free blocks for decode batch")
+        for request, cache in zip(requests, caches):
+            cache.update_block_table(manager.ensure_capacity(request.request_id, cache.sequence_length + 1))
+        batch = BatchedPagedKVCache(caches)
+        inputs = torch.tensor([[r.generated_token_ids[-1]] for r in requests], device=self.device)
+        try:
+            logits = self.model(inputs, cache=batch)
+            tokens = self.sampler(logits[:, -1, :]).tolist()
+            for request, token in zip(requests, tokens):
+                request.append_token(int(token))
+            return tokens
+        except Exception:
+            # Any layer may have written KV for every selected row.
+            for request in requests:
+                self.release(request)
+            raise
 
     def release(self, request: Request) -> None:
         if not isinstance(request, Request):

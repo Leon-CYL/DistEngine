@@ -204,6 +204,31 @@ class PagedKVCache:
         self.lengths = [0] * self.num_layers
         
         
+class BatchedPagedKVCache:
+    """One-token decode view over independent paged caches, padded on the right."""
+
+    def __init__(self, caches: list[PagedKVCache]):
+        if not caches:
+            raise ValueError("A decode batch must not be empty")
+        self.caches = list(caches)
+        self.num_layers = caches[0].num_layers
+        self.lengths = [cache.sequence_length for cache in caches]
+        if any(cache.num_layers != self.num_layers or length + 1 > cache.capacity
+               for cache, length in zip(caches, self.lengths)):
+            raise ValueError("Incompatible or full batch cache")
+        self.key_lengths = torch.tensor([n + 1 for n in self.lengths], device=caches[0].device)
+
+    def append(self, layer_index, k, v):
+        if k.shape[0] != len(self.caches) or k.shape[2] != 1:
+            raise ValueError("Batched cache supports one token per request")
+        rows = [cache.append(layer_index, k[i:i + 1], v[i:i + 1])
+                for i, cache in enumerate(self.caches)]
+        longest = max(self.lengths) + 1
+        return tuple(torch.cat([torch.nn.functional.pad(row[j], (0, 0, 0, longest - row[j].shape[2]))
+                                for row in rows], dim=0) for j in (0, 1))
+
+
+
 def main():
     table = [3, 0, 5]
 

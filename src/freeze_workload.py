@@ -52,16 +52,23 @@ def build_prompt_bank(tokenizer):
     return tuple(bank)
 
 
-def freeze(output: Path, *, local_files_only=False):
+def freeze(output: Path, *, local_files_only=False, num_requests=100,
+           rate_rps=2.0, max_new_tokens=32, kv_capacity_tokens=1024, num_prefill_workers=2):
+    if type(num_prefill_workers) is not int or num_prefill_workers <= 0:
+        raise ValueError("num_prefill_workers must be a positive integer")
+    if type(num_requests) is not int or num_requests <= 0:
+        raise ValueError("num_requests must be a positive integer")
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("Output directory must be empty; preserve frozen inputs")
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_ID, revision=REVISION, local_files_only=local_files_only,
     )
     bank = build_prompt_bank(tokenizer)
     settings = dict(
-        arrival_mode="poisson", rate_rps=2.0, num_requests=100,
+        arrival_mode="poisson", rate_rps=rate_rps, num_requests=num_requests,
         arrival_seed=42, prompt_seed=19, class_weights=WEIGHTS,
-        max_new_tokens=32, eos_token_id=tokenizer.eos_token_id,
-        vocab_size=32000, max_context_tokens=2048, kv_capacity_tokens=1024,
+        max_new_tokens=max_new_tokens, eos_token_id=tokenizer.eos_token_id,
+        vocab_size=32000, max_context_tokens=2048, kv_capacity_tokens=kv_capacity_tokens,
     )
     workload = generate_mixed_workload(prompt_bank=bank, **settings)
     output.mkdir(parents=True, exist_ok=True)
@@ -76,7 +83,7 @@ def freeze(output: Path, *, local_files_only=False):
                     "prompt_id": by_tokens[r.prompt_token_ids].prompt_id,
                     "length_class": by_tokens[r.prompt_token_ids].length_class}
                    for r in workload.requests]
-    source_totals = [sum(len(r.prompt_token_ids) for r in workload.requests[i::2]) for i in range(2)]
+    source_totals = [sum(len(r.prompt_token_ids) for r in workload.requests[i::num_prefill_workers]) for i in range(num_prefill_workers)]
     write_json(output / "manifest.json", {
         "schema_version": 1, "model_id": MODEL_ID, "tokenizer_id": MODEL_ID,
         "revision": REVISION, "chat_template": tokenizer.chat_template,
@@ -85,9 +92,9 @@ def freeze(output: Path, *, local_files_only=False):
         "workload": {"file": workload_path.name, "sha256": digest(workload_path)},
         "class_counts": dict(Counter(a["length_class"] for a in assignments)),
         "request_prompts": assignments,
-        "round_robin": {"num_prefill_workers": 2, "prompt_tokens_per_source": source_totals,
-                        "max_to_min_ratio": max(source_totals) / min(source_totals)},
-        "capacity_note": "Each worker needs at least 1024 KV token slots (e.g. 64 blocks of 16); this is not a throughput recommendation.",
+        "round_robin": {"num_prefill_workers": num_prefill_workers, "prompt_tokens_per_source": source_totals,
+                        "max_to_min_ratio": max(source_totals) / min(source_totals) if min(source_totals) else None},
+        "capacity_note": f"Each worker needs at least {kv_capacity_tokens} KV token slots (e.g. {(kv_capacity_tokens + 15) // 16} blocks of 16); this is not a throughput recommendation.",
     })
     print(f"Frozen {len(workload.requests)} requests in {output}")
     print(f"Prompt lengths: {[(p.prompt_id, len(p.token_ids)) for p in bank]}")
@@ -98,10 +105,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("workloads/stage19"))
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--num-prefill-workers", type=int, default=2)
+    parser.add_argument("--num-requests", type=int, default=100)
+    parser.add_argument("--rate-rps", type=float, default=2.0)
+    parser.add_argument("--max-new-tokens", type=int, default=32)
+    parser.add_argument("--kv-capacity-tokens", type=int, default=1024)
     args = parser.parse_args()
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("Output directory must be empty; preserve frozen inputs or choose a new path")
-    freeze(args.output, local_files_only=args.local_files_only)
+    freeze(args.output, local_files_only=args.local_files_only,
+           num_requests=args.num_requests, rate_rps=args.rate_rps,
+           max_new_tokens=args.max_new_tokens, kv_capacity_tokens=args.kv_capacity_tokens,
+           num_prefill_workers=args.num_prefill_workers)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@ import torch
 from benchmark_stage21 import run_benchmark, smoke_workload, save_report
 from distengine.telemetry import GPUSampler, SystemSampler, WorkerActivity, measured
 from verify_workload import FakeClock
+from verify_workload import FakeCoordinator, with_offsets
+from distengine.workload import replay_workload
+from verify_runner import raises
 
 
 def check_activity():
@@ -110,6 +113,38 @@ def main():
         assert json.loads((target / "baseline.json").read_text())["status"] == "cpu-smoke-passed"
         assert len(list(target.glob("run-*.json"))) == 2
     print("PASS: repeated warm-up/replay, exact outputs, request/system metrics and saved baseline files")
+    configured = run_benchmark(
+        asdict(smoke_workload()), cpu=True, repeats=1, interval_s=.001,
+        num_blocks=128, max_held_requests=4, warmup_requests=8,
+    )
+    assert configured["config"]["num_blocks"] == 128
+    assert configured["config"]["max_held_requests"] == 4
+    assert configured["config"]["warmup_requests_per_run"] == 8
+    assert all(w["num_blocks"] == 128 for w in configured["runs"][0]["worker_activity"])
+    for name in ("num_blocks", "block_size", "max_held_requests", "warmup_requests"):
+        raises(ValueError, lambda: run_benchmark(asdict(smoke_workload()), cpu=True, **{name: 0}))
+    print("PASS: configurable KV/holding/warm-up settings applied to workers and saved in reports")
+    clock = FakeClock()
+    c = FakeCoordinator(clock, step_duration=2)
+    results = replay_workload(with_offsets([0, 1, 2]), c, clock=clock,
+                              sleep=clock.sleep, deadline=101)
+    assert results == [{"request_id": "0"}]
+    assert len([e for e in c.events if e[0] == "submit"]) == 1
+    clock = FakeClock()
+    c = FakeCoordinator(clock)
+    assert replay_workload(with_offsets([2]), c, clock=clock,
+                           sleep=clock.sleep, deadline=100.5) == []
+    assert clock() == 100.5
+    partial = run_benchmark(asdict(smoke_workload()), cpu=True, repeats=3, max_run_s=1e-12)
+    assert partial["status"] == "time-limited" and not partial["complete"]
+    assert len(partial["runs"]) == 1 and partial["runs"][0]["not_submitted"] == 6
+    assert len(partial["cleanup"]) == 4
+    assert all(w["closed"] and not w["kv_blocks_used"] for w in partial["cleanup"])
+    with TemporaryDirectory() as directory:
+        save_report(partial, Path(directory) / "partial")
+        saved = json.loads((Path(directory) / "partial" / "baseline.json").read_text())
+        assert saved["status"] == "time-limited"
+    print("PASS: soft deadlines, capped sleeps, partial export, repeat suppression and unfinished cleanup")
 
 
 if __name__ == "__main__":

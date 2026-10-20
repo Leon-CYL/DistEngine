@@ -39,7 +39,7 @@ class _MultiDecodeScheduling:
                 if first_error is None:
                     first_error = error
             else:
-                self.decode_ready[index].popleft()
+                self.decode_ready[index].remove(request_id)
                 if result["status"] == "FINISHED":
                     self.completed.append(result)
                 else:
@@ -54,7 +54,7 @@ class _MultiDecodeScheduling:
         except Exception:
             return  # Keep ownership if an actor's outcome is unknown.
         if request_id not in info["active_request_ids"]:
-            self.decode_ready[index].popleft()
+            self.decode_ready[index].remove(request_id)
             self._record_retired(request_id, error)
 
     def _pull_targets(self):
@@ -118,7 +118,10 @@ class MultiDecodeCoordinator(_MultiDecodeScheduling, MultiPrefillCoordinator):
     as required by the existing KV handoff contract.
     """
 
-    def __init__(self, sources, targets, *, metrics=None):
+    def __init__(self, sources, targets, *, metrics=None, decode_batch_size=1):
+        if type(decode_batch_size) is not int or decode_batch_size <= 0:
+            raise ValueError("decode_batch_size must be a positive integer")
+        self.decode_batch_size = decode_batch_size
         self.targets = list(targets)
         sources = list(sources)
         if not self.targets:
@@ -172,13 +175,16 @@ class MultiDecodeCoordinator(_MultiDecodeScheduling, MultiPrefillCoordinator):
         for index, target in enumerate(self.targets):
             if not self.decode_ready[index]:
                 continue
-            request_id = self.decode_ready[index][0]
+            ids = list(self.decode_ready[index])[:self.decode_batch_size]
             try:
-                result = target.step(request_id)
+                results = ([target.step(ids[0])] if self.decode_batch_size == 1
+                           else target.step_batch(ids))
             except Exception as exc:
-                yield index, request_id, None, exc
+                for request_id in ids:
+                    yield index, request_id, None, exc
             else:
-                yield index, request_id, result, None
+                for request_id, result in zip(ids, results):
+                    yield index, request_id, result, None
 
     def _prefill_all(self):
         first_error = None

@@ -68,7 +68,8 @@ class SystemSampler:
         now = self.clock()
         if not force and now < self.next_sample:
             return
-        workers = self.fetch_workers()
+        cached = getattr(self.coordinator, "cached_workers", None)
+        workers = cached() if cached is not None and not force else self.fetch_workers()
         c = self.coordinator
         self.samples.append({
             "observed_s": now - self.started_at,

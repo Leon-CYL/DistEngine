@@ -13,8 +13,10 @@ def source_identity(root):
     return {"files": files, "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
 
 
-def frozen_inputs(root):
-    directory = root / "workloads" / "stage19"
+def frozen_inputs(root, directory=None):
+    directory = Path(directory) if directory is not None else Path("workloads/stage19")
+    if not directory.is_absolute():
+        directory = root / directory
     texts = {name: (directory / name).read_text() for name in
              ("mixed-v1.json", "manifest.json", "prompt-bank.json")}
     manifest = json.loads(texts["manifest.json"])

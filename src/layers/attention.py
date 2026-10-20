@@ -3,7 +3,7 @@ from torch import nn
 
 from .linear import Linear
 from .rotary_embedding import RotaryEmbedding
-from distengine.paged_kv_cache import PagedKVCache
+from distengine.paged_kv_cache import PagedKVCache, BatchedPagedKVCache
 
 
 class Attention(nn.Module):
@@ -26,6 +26,7 @@ class Attention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        key_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # q: [B, num_heads,    T, head_dim]
         # k: [B, num_kv_heads, T, head_dim]
@@ -57,6 +58,10 @@ class Attention(nn.Module):
         future_mask = (key_positions.unsqueeze(0) > query_positions.unsqueeze(1))
 
         scores = scores.masked_fill(future_mask, float("-inf"))
+
+        if key_lengths is not None:
+            padding = key_positions[None, :] >= key_lengths[:, None]
+            scores = scores.masked_fill(padding[:, None, None, :], float("-inf"))
 
         probabilities = torch.softmax(
             scores.float(),
@@ -107,7 +112,7 @@ class LlamaAttention(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        cache: PagedKVCache | None = None,
+        cache: PagedKVCache | BatchedPagedKVCache | None = None,
         layer_index: int = 0,
     ) -> torch.Tensor:
         batch_size, sequence_length, _ = x.shape
@@ -129,7 +134,7 @@ class LlamaAttention(nn.Module):
         if cache is not None:
             k, v = cache.append(layer_index, k, v)
 
-        context = self.attn(q, k, v)
+        context = self.attn(q, k, v, key_lengths=getattr(cache, "key_lengths", None))
 
         context = context.transpose(1, 2).contiguous().view(
             batch_size,

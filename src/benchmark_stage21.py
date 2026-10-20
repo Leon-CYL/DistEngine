@@ -1,8 +1,9 @@
-"""Repeated stealing-disabled baseline with request, worker and GPU telemetry."""
+"""Repeated baseline/stealing benchmark with request, worker and GPU telemetry."""
 
 import argparse
 from dataclasses import asdict, replace
 import gc
+import math
 import json
 import os
 from pathlib import Path
@@ -33,10 +34,53 @@ def smoke_workload():
 
 
 
+def comparison_order(repeats):
+    """Counterbalance adjacent pairs: off/on, on/off, off/on, ..."""
+    return [mode for pair in range(repeats)
+            for mode in ((False, True) if pair % 2 == 0 else (True, False))]
+
+
+def aggregate_runs(reports):
+    aggregates = {}
+    for name in ("request_throughput_rps", "completed_output_tokens_per_s", "goodput_rps"):
+        values = [r["request_metrics"][name] for r in reports]
+        aggregates[name] = {"values": values, "mean": statistics.mean(values) if values else None,
+                            "stdev": statistics.stdev(values) if len(values) > 1 else None}
+    latency = {}
+    for metric in ("ttft_s", "tpot_s", "e2e_s", "prefill_wait_s", "submission_delay_s"):
+        latency[metric] = {}
+        for quantile in ("p50", "p95", "p99"):
+            values = [r["request_metrics"]["latencies"][metric][quantile] for r in reports]
+            values = [v for v in values if v is not None]
+            latency[metric][quantile] = {
+                "values": values, "mean": statistics.mean(values) if values else None,
+                "stdev": statistics.stdev(values) if len(values) > 1 else None}
+    return {"aggregate": aggregates, "latency_across_runs": latency, "executed_repeats": len(reports)}
+
+
 def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
-                  limits=None, provenance=None, frozen_files=None):
+                  limits=None, provenance=None, frozen_files=None, num_blocks=64,
+                  block_size=16, max_held_requests=2, warmup_requests=4,
+                  gpu_family=None, min_gpu_memory_gib=0, max_run_s=None, decode_batch_size=1, prefill_workers=2, decode_workers=2, stealing_enabled=False, compare_stealing=False):
     if type(repeats) is not int or repeats <= 0 or interval_s <= 0:
         raise ValueError("Repeat count and sampling interval must be positive")
+    for name, value in (("prefill_workers", prefill_workers), ("decode_workers", decode_workers),
+                        ("decode_batch_size", decode_batch_size), ("num_blocks", num_blocks), ("block_size", block_size),
+                        ("max_held_requests", max_held_requests), ("warmup_requests", warmup_requests)):
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if max_run_s is not None and (not isinstance(max_run_s, (int, float)) or
+                                  not math.isfinite(max_run_s) or max_run_s <= 0):
+        raise ValueError("max_run_s must be finite and positive")
+    if type(stealing_enabled) is not bool:
+        raise ValueError("stealing_enabled must be a boolean")
+    if type(compare_stealing) is not bool:
+        raise ValueError("compare_stealing must be a boolean")
+    if compare_stealing and stealing_enabled:
+        raise ValueError("Choose compare_stealing or stealing_enabled, not both")
+    if cpu and (stealing_enabled or compare_stealing):
+        raise ValueError("Stealing requires Ray workers; use verify_work_stealing.py for CPU Ray checks")
+    total_workers = prefill_workers + decode_workers
     limits = limits or LatencyLimits(2, .1, 10)
     workload = _workload_from_dict(workload_payload)
     if not workload.requests:
@@ -44,7 +88,7 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
     torch.set_num_threads(1)
     workers = []
     ray = None
-    blocks, block_size = 64, 16
+    blocks = num_blocks
     keys = {(r.prompt_token_ids, r.max_new_tokens, r.eos_token_id) for r in workload.requests}
     for prompt, output, eos in keys:
         if len(prompt) + output - 1 > blocks * block_size:
@@ -53,9 +97,9 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
         from distengine.holding_pool import PrefillHoldingPool
         from distengine.workers import PrefillWorker, DecodeWorker
         from verify_workers import make_model
-        for _ in range(2):
-            workers.append(PrefillWorker(make_model(), blocks, block_size, PrefillHoldingPool(2)))
-        for _ in range(2):
+        for _ in range(prefill_workers):
+            workers.append(PrefillWorker(make_model(), blocks, block_size, PrefillHoldingPool(max_held_requests)))
+        for _ in range(decode_workers):
             workers.append(DecodeWorker(make_model(), blocks, block_size))
         model = workers[0].runner.model
         device = torch.device("cpu")
@@ -65,8 +109,8 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
         ray = ray_module
         if ray.is_initialized():
             raise RuntimeError("Benchmark requires a fresh Ray runtime")
-        if not torch.cuda.is_available() or torch.cuda.device_count() != 4:
-            raise RuntimeError("Benchmark requires exactly four visible NVIDIA GPUs")
+        if not torch.cuda.is_available() or torch.cuda.device_count() != total_workers:
+            raise RuntimeError(f"Benchmark requires exactly {total_workers} visible NVIDIA GPUs")
         GPUSampler._query()  # Fail before loading weights if GPU polling is unavailable.
         from load_model import load_model, MODEL_ID, REVISION
         device = torch.device("cuda:0")
@@ -84,42 +128,50 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
         gc.collect()
         torch.cuda.empty_cache()
     reports = []
+    cleanup_state = []
     try:
         if not cpu:
             import sys
             from distengine.ray_workers import PrefillActor, DecodeActor
-            from distengine.multi_decode_ray_coordinator import MultiDecodeRayCoordinator
-            ray.init(address="local", num_cpus=4, num_gpus=4, include_dashboard=False,
+            ray.init(address="local", num_cpus=total_workers, num_gpus=total_workers, include_dashboard=False,
                      runtime_env={"py_executable": sys.executable})
-            for _ in range(2):
+            for _ in range(prefill_workers):
                 workers.append(PrefillActor.options(num_gpus=1).remote(
                     num_blocks=blocks, block_size=block_size, device="cuda", checkpoint=True,
-                    max_held_requests=2))
-            for _ in range(2):
+                    max_held_requests=max_held_requests))
+            for _ in range(decode_workers):
                 workers.append(DecodeActor.options(num_gpus=1).remote(
                     num_blocks=blocks, block_size=block_size, device="cuda", checkpoint=True))
             placement = ray.get([w.ready.remote() for w in workers], timeout=600)
-            if len({i["pid"] for i in placement}) != 4 or len({g for i in placement for g in i["ray_gpu_ids"]}) != 4:
+            if len({i["pid"] for i in placement}) != total_workers or len({g for i in placement for g in i["ray_gpu_ids"]}) != total_workers:
                 raise RuntimeError("Workers do not have independent processes and GPUs")
             if any(i["device"] != "cuda:0" or i["kv_device"] != "cuda:0" or
                    i["visible_gpu_count"] != 1 for i in placement):
                 raise RuntimeError("Unexpected model/KV GPU placement")
+            if gpu_family is not None and any(gpu_family not in i["gpu_name"] for i in placement):
+                raise RuntimeError(f"Expected {gpu_family} GPUs")
+            if any(i.get("gpu_memory_bytes", 0) < min_gpu_memory_gib * 1024**3 for i in placement):
+                raise RuntimeError("GPU memory does not match the requested baseline profile")
         else:
             placement = [w.info() for w in workers]
-        for run in range(repeats):
-            factory = MultiDecodeCoordinator if cpu else MultiDecodeRayCoordinator
-            warm = factory(workers[:2], workers[2:])
+        modes = comparison_order(repeats) if compare_stealing else [stealing_enabled] * repeats
+        for run, mode in enumerate(modes):
+            from distengine.independent_ray_coordinator import IndependentRayCoordinator
+            factory = MultiDecodeCoordinator if cpu else IndependentRayCoordinator
+            scheduling = dict(decode_batch_size=decode_batch_size)
+            if not cpu:
+                scheduling["stealing_enabled"] = mode
+            warm = factory(workers[:prefill_workers], workers[prefill_workers:], **scheduling)
             longest = max(workload.requests, key=lambda r: len(r.prompt_token_ids))
-            for i in range(4):
+            for i in range(warmup_requests):
                 warm.submit(f"warmup-{run}-{i}", list(longest.prompt_token_ids),
                             longest.max_new_tokens, longest.eos_token_id)
-            for _ in range(4 * longest.max_new_tokens + 30):
-                if not warm.has_pending():
-                    break
+            warmup_deadline = time.perf_counter() + 60
+            while warm.has_pending() and time.perf_counter() < warmup_deadline:
                 warm.step()
             if warm.has_pending():
                 raise RuntimeError("Warm-up did not drain")
-            c = factory(workers[:2], workers[2:])
+            c = factory(workers[:prefill_workers], workers[prefill_workers:], **scheduling)
             if cpu:
                 for w in workers:
                     w.start_measurement()
@@ -135,7 +187,9 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
             if gpu is not None:
                 gpu.start(metrics.started_at)
             try:
-                outputs = replay_workload(workload, c, metrics=metrics, sample=sampler.sample)
+                outputs = replay_workload(
+                    workload, c, metrics=metrics, sample=sampler.sample,
+                    deadline=None if max_run_s is None else metrics.started_at + max_run_s)
             finally:
                 try:
                     final_workers = fetch(stop=True)
@@ -144,53 +198,76 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
                         gpu.stop()
             sampler.sample(force=True)
             request_report = metrics.report(limits)
-            if len(outputs) != len(workload.requests) or len({r["request_id"] for r in outputs}) != len(outputs):
-                raise RuntimeError("Missing or duplicate request completions")
+            complete = len(outputs) == len(workload.requests) and not c.has_pending()
+            if len({r["request_id"] for r in outputs}) != len(outputs):
+                raise RuntimeError("Duplicate request completions")
+            if not complete and max_run_s is None:
+                raise RuntimeError("Missing request completions")
             by_id = {r["request_id"]: r for r in outputs}
             for request in workload.requests:
+                if request.request_id not in by_id:
+                    continue
                 result = by_id[request.request_id]
                 if result["status"] != "FINISHED" or result["prompt_token_ids"] + result["generated_token_ids"] != expected[(request.prompt_token_ids, request.max_new_tokens, request.eos_token_id)]:
                     raise RuntimeError(f"Output mismatch: {request.request_id}")
-            if any(w["active_request_ids"] or w["num_free_blocks"] != w["num_blocks"] or w["held_requests"] for w in final_workers):
+            if complete and any(w["active_request_ids"] or w["num_free_blocks"] != w["num_blocks"] or w["held_requests"] for w in final_workers):
                 raise RuntimeError("Workers retained KV after replay")
             gpu_report = {"available": False, "reason": "CPU smoke test"} if gpu is None else gpu.report(request_report["duration_s"])
             if not cpu and (gpu_report["errors"] or not gpu_report["samples"]):
                 raise RuntimeError(f"GPU sampling failed: {gpu_report['errors']}")
-            reports.append({"run": run, "request_metrics": request_report,
+            reports.append({"run": run, "stealing_enabled": mode, "complete": complete,
+                            "stop_reason": "drained" if complete else "measured-time limit",
+                            "not_submitted": len(workload.requests) - request_report["submitted"],
+                            "request_metrics": request_report,
                             "state_samples": sampler.samples, "worker_activity": final_workers,
                             "gpu": gpu_report, "decode_assignments": dict(c.decode_assignments),
-                            "outputs": outputs, "output_correctness": "all match uncached greedy baseline"})
-            print(f"PASS run {run + 1}/{repeats}: {len(outputs)} exact outputs, {request_report['duration_s']:.3f}s, full KV release", flush=True)
-        aggregates = {}
-        for name in ("request_throughput_rps", "completed_output_tokens_per_s", "goodput_rps"):
-            values = [r["request_metrics"][name] for r in reports]
-            aggregates[name] = {"values": values, "mean": statistics.mean(values),
-                                "stdev": statistics.stdev(values) if len(values) > 1 else None}
-        latency_variation = {}
-        for metric in ("ttft_s", "tpot_s", "e2e_s", "prefill_wait_s", "submission_delay_s"):
-            latency_variation[metric] = {}
-            for quantile in ("p50", "p95", "p99"):
-                values = [r["request_metrics"]["latencies"][metric][quantile] for r in reports]
-                values = [v for v in values if v is not None]
-                latency_variation[metric][quantile] = {
-                    "values": values, "mean": statistics.mean(values) if values else None,
-                    "stdev": statistics.stdev(values) if len(values) > 1 else None}
-        return {"stage": 21, "status": "cpu-smoke-passed" if cpu else "baseline-passed",
-                "stealing_enabled": False, "model": model_id, "revision": revision,
+                            "prefill_assignments": dict(getattr(c, "prefill_assignments", {})),
+                            "steal_events": list(getattr(c, "steal_events", [])),
+                            "steal_count": len(getattr(c, "steal_events", [])),
+                            "outputs": outputs, "output_correctness": "completed outputs match uncached greedy baseline"})
+            label = "PASS" if complete else "PARTIAL"
+            print(f"{label} run {run + 1}/{len(modes)} (stealing={mode}): {len(outputs)}/{len(workload.requests)} exact outputs, "
+                  f"{request_report['duration_s']:.3f}s", flush=True)
+            if not complete:
+                break  # Do not spend more on repeats of an overloaded calibration.
+        summary = aggregate_runs(reports)
+        comparison = ({name: aggregate_runs([r for r in reports if r["stealing_enabled"] == enabled])
+                       for name, enabled in (("no-stealing", False), ("stealing", True))}
+                      if compare_stealing else None)
+        return {"stage": 22 if compare_stealing else 21,
+                "status": "time-limited" if not all(r["complete"] for r in reports) else
+                          ("cpu-smoke-passed" if cpu else
+                           ("calibration-passed" if max_run_s is not None else "baseline-passed")),
+                "purpose": "paired-stealing-comparison" if compare_stealing else
+                           "calibration" if max_run_s is not None else "baseline",
+                "complete": all(r["complete"] for r in reports),
+                "stealing_enabled": None if compare_stealing else stealing_enabled,
+                "comparison": comparison, "comparison_order": modes if compare_stealing else None, "model": model_id, "revision": revision,
                 "dtype": "float32", "python": platform.python_version(), "torch": torch.__version__,
                 "ray": None if cpu else ray.__version__, "placement": placement,
-                "config": {"prefill_workers": 2, "decode_workers": 2, "num_blocks": blocks,
-                           "block_size": block_size, "max_held_requests": 2, "repeats": repeats,
-                           "sample_interval_s": interval_s, "warmup_requests_per_run": 4,
+                "config": {"prefill_workers": prefill_workers, "decode_workers": decode_workers, "decode_batch_size": decode_batch_size, "num_blocks": blocks,
+                           "block_size": block_size, "max_held_requests": max_held_requests, "repeats": repeats,
+                           "sample_interval_s": interval_s, "warmup_requests_per_run": warmup_requests,
+                           "max_run_s": max_run_s, "executed_repeats": len(reports),
                            "warmup_policy": "longest prompt, unchanged output limit/EOS",
-                           "goodput_limits": asdict(limits)},
+                           "compare_stealing": compare_stealing,
+                           "planned_measured_passes": len(modes),
+                           "goodput_limits": asdict(limits), "required_gpu_family": gpu_family,
+                           "min_gpu_memory_gib": min_gpu_memory_gib,
+                           "execution_policy": ("independent; event-driven actors" if not cpu
+                                                else "phase-based; concurrent actors within each phase")},
                 "provenance": provenance, "frozen_files": frozen_files,
-                "workload": asdict(workload), "runs": reports, "aggregate": aggregates,
-                "latency_across_runs": latency_variation,
-                "limitations": ["State samples are at tick boundaries and may miss transient peaks.",
+                "workload": asdict(workload), "runs": reports, "aggregate": {} if compare_stealing else summary["aggregate"],
+                "cleanup": cleanup_state,
+                "latency_across_runs": {} if compare_stealing else summary["latency_across_runs"],
+                "limitations": [("Periodic worker state is cached from completed operations; snapshot ages and in-flight flags are included."
+                                 if not cpu else
+                                 "State samples are at tick boundaries and may miss transient peaks."),
                                 "Polling/RPC and explicit CUDA synchronization overhead is included.",
                                 "Worker idle is wall time outside measured operations, not GPU idle.",
-                                "GPU utilization is nvidia-smi's sampled window, not per-kernel timing."]}
+                                "GPU utilization is nvidia-smi's sampled window, not per-kernel timing.",
+                                "Time-limited reports censor unfinished requests; completed-only latencies are not a full baseline.",
+                                "Soft deadlines are checked between calls and may overrun one blocking operation."]}
     finally:
         import sys
         already_failing = sys.exc_info()[0] is not None
@@ -199,8 +276,13 @@ def run_benchmark(workload_payload, *, cpu=False, repeats=3, interval_s=.25,
             try:
                 if cpu:
                     w.close()
+                    closed = w.telemetry()
                 else:
                     ray.get(w.close.remote(), timeout=10)
+                    closed = ray.get(w.telemetry.remote(), timeout=10)
+                cleanup_state.append(closed)
+                if closed["active_request_ids"] or closed["kv_blocks_used"] or closed["held_requests"]:
+                    raise RuntimeError("Worker retained KV after close")
             except Exception as exc:
                 cleanup_errors.append(exc)
             finally:
@@ -218,14 +300,15 @@ def main():
     parser.add_argument("--cpu", action="store_true", help="Small-model smoke check, not the GPU baseline")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output", type=Path, default=Path("results/stage21-cpu-smoke"))
+    parser.add_argument("--decode-batch-size", type=int, default=1)
     args = parser.parse_args()
     if not args.cpu:
-        parser.error("Use the Modal runner for the four-GPU baseline")
+        parser.error("Use the Modal runner for the GPU benchmark")
     if args.output.exists():
         parser.error("Choose a new output directory")
     root = Path(__file__).resolve().parents[1]
     report = run_benchmark(asdict(smoke_workload()), cpu=True, repeats=args.repeats,
-                           interval_s=.01, provenance=source_identity(root))
+                           interval_s=.01, provenance=source_identity(root), decode_batch_size=args.decode_batch_size)
     save_report(report, args.output)
     print(f"Saved {args.output / 'baseline.json'}")
 

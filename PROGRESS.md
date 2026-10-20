@@ -775,8 +775,11 @@ and a baseline on this expanded worker topology remain stage 21.
 
 ## Stage 21 — Metrics + baseline benchmark
 
-Status: complete; CPU/system tests, real local Ray request metrics, and three
-four-T4 pinned TinyLlama baseline repeats passed on October 18, 2026 (Pacific).
+Status: complete. Metrics and validation are finished, and the selected baseline
+is 200 Poisson requests at 5 RPS, three passes, independent prefill/decode
+scheduling and decode batch size four on two prefill plus two decode A100 80 GB
+GPUs. All 600 outputs matched exactly, with zero failures or unfinished requests
+and full KV cleanup. The tables below record performance and SLO attainment.
 
 - Extended `src/distengine/metric.py` with shared clock/origin support, raw
   request events, first-prefill-dispatch timing, token observations, failures,
@@ -845,7 +848,7 @@ submission delay is reported separately from latency measured since submission.
 KV occupancy counts allocated/reserved blocks, including full decode reservations,
 rather than only token positions already written.
 
-GPU baseline verification on October 18, 2026:
+T4 validation measurements on October 18, 2026 (retained for correctness history):
 
 - `modal run src/Modal/run_benchmark.py` completed with stealing disabled on two
   prefill and two decode Tesla T4 actors. The local Modal CLI uses Python 3.9;
@@ -867,6 +870,313 @@ GPU baseline verification on October 18, 2026:
   `run-01.json`, and `run-02.json` include all raw data and replay inputs.
   Modal run: https://modal.com/apps/leonlin0106/main/ap-ooBDCSJJMGF94aQG3Gl9ic
   Remote logs use October 19 UTC; execution completed October 18 Pacific time.
+
+Previous large A100 profile prepared on October 19, 2026 (superseded):
+
+- Performance measurements now target four explicitly requested A100 80 GB GPUs
+  (`A100-80GB:4`), two prefill and two decode model replicas. T4 helpers remain
+  validation tools. The container requests 16 CPU cores, 96 GiB host memory and
+  a two-hour timeout. GPU family and at least 75 GiB of physical GPU memory are
+  checked before measurement; actual GPU names/memory are recorded.
+- Frozen `workloads/a100-rps4/` contains 1,000 requests: 600 short, 300 medium,
+  100 long, Poisson arrivals at 4 RPS, and the original independent seeds.
+  The last scheduled arrival is at 263.764 seconds. Output limit stays at 32,
+  with normal EOS, float32 and the pinned model/tokenizer unchanged.
+- Each worker has 512 blocks of 16 tokens (8,192 aggregate KV token slots),
+  prefill holding capacity is eight, warm-up is 16 longest-prompt requests per
+  repeat, and three measured repeats remain the default. More KV permits more
+  in-flight requests; it does not add batching or increase the model context.
+- KV block count, holding capacity, warm-up count and input directory are CLI
+  settings and saved in the report. Freeze CLI exposes request count, rate,
+  output limit and capacity. The original 100-request fixture remains unchanged.
+- CPU configurable-capacity tests, legacy byte-identical tokenizer rebuild,
+  new input checksums, exact quotas, deterministic generation and rate/selection
+  independence passed. Execution was left to the user, who later reported
+  excessive runtime/cost; no completed local report is available.
+- The large input files are preserved, but this profile is no longer the launch
+  default. Goodput limits stay fixed at 2 / 0.1 / 10 seconds for TTFT / TPOT / E2E.
+- Execution remains phase-based: sources run concurrently during prefill, and
+  targets run concurrently during decode, with no overlap between phases or
+  per-GPU batching. Reports identify this policy. An asynchronous pipeline is a
+  separate future change requiring a fresh baseline. This larger profile also
+  changes load and capacity, so it is not a pure hardware-only comparison.
+
+
+Cost-bounded A100 redesign on October 19, 2026:
+
+- The user reported a large-profile pass taking too long and costing over $5.
+  No local completed A100 report was available to infer its throughput; the
+  previous request count and repeat count were too aggressive for calibration.
+- Keep four A100 80 GB replicas (two per role), but default to 60 requests at
+  2 RPS, 16 output tokens, one measured repeat, four warm-up requests, 128 KV
+  blocks per worker, holding capacity four and 0.5-second system sampling.
+  The frozen short profile has 36/18/6 prompt-class counts and its last arrival
+  is at 24.503 seconds. Original large inputs/results remain intact.
+- The launcher now requests 8 CPU cores/64 GiB RAM and a 600-second function
+  timeout, replacing the two-hour timeout. A 90-second soft measured deadline
+  returns partial outputs/metrics, suppresses subsequent repeats, and closes
+  unfinished workers. Deadline checks occur between calls and can overrun an
+  in-flight operation; hard timeouts/setup errors can prevent report export.
+- Reports distinguish calibration from full baselines, record completion,
+  not-submitted/unfinished counts and stop reason, and verify post-close KV
+  cleanup. Completed-only latency distributions in partial reports are censored.
+- CLI measured limits must be positive and at most 180 seconds per repeat, and
+  repeats × limit cannot exceed 240 seconds. GPU-only pricing is printed before
+  remote invocation: four A100 80 GB GPUs at the published $0.000694/GPU/s rate
+  are about $0.17/minute, or $1.67 for 600 seconds. CPU, memory, startup and other
+  billing are additional; these settings do not guarantee an exact dollar cap.
+- CPU tests passed soft-deadline behavior, bounded idle sleeps, saved partial
+  reports, repeat suppression and post-close cleanup. The short frozen inputs
+  passed checksums, class counts and output-limit checks. No additional GPU
+  job was launched for this redesign.
+- Run `modal run src/Modal/run_benchmark.py --output results/stage21-a100-calibration`.
+  Inspect this single short run before selecting a rate sweep or repeats. Full
+  asynchronous phase overlap and per-GPU batching remain separate improvements.
+
+Current bounded trial requested on October 19, 2026:
+
+- Prepared `workloads/a100-200-rps4/`: 200 requests at 4 RPS, with exact
+  120/60/20 prompt-class counts, a 16-token output limit, and last scheduled
+  arrival at 50.012 seconds. Hashes, quotas and output limits were checked.
+- Launcher defaults now select this profile and three passes with a 90-second
+  measured limit per pass. The measured-budget guard is raised from 240 to
+  270 seconds. Four A100 80 GB replicas, four warm-up requests, 128 KV blocks,
+  holding capacity four, and the 600-second function timeout are unchanged.
+- A mocked launcher check accepted 3 × 90 seconds and rejected 4 × 90 seconds
+  before remote invocation. No GPU job was launched while preparing this trial.
+- Run `modal run src/Modal/run_benchmark.py --repeats 3 --max-run-seconds 90
+  --output results/stage21-a100-200-rps4` (one command). Partial runs still save
+  results and suppress subsequent passes; completing all three passes is not
+  guaranteed by the soft time limits. Setup and warm-up are outside measured
+  limits and remain inside the function timeout.
+
+### Selected baseline: independent scheduling, batch four, 200 requests at 5 RPS
+
+Source: `results/stage21-a100-80gb-200-rps5-independent-batch4/baseline.json`.
+[Modal run](https://modal.com/apps/leonlin0106/main/ap-Oh8umIqRVI8aEitIWHbGZW).
+
+Configuration: four A100-SXM4 80 GB GPUs (two prefill, two decode), independent
+prefill/decode execution, decode batches up to four, 200 frozen Poisson requests
+at 5 RPS per pass, float32, 16 output tokens maximum, three passes, four warm-up
+requests per pass, 128 blocks × 16 tokens per worker and holding capacity four.
+No per-pass deadline; the overall Modal function timeout remains 600 seconds.
+
+| Metric | Pass 1 | Pass 2 | Pass 3 |
+| --- | ---: | ---: | ---: |
+| Measured duration (s) | 41.255 | 41.234 | 41.251 |
+| Completed requests | 200 | 200 | 200 |
+| Failed requests | 0 | 0 | 0 |
+| Unfinished requests | 0 | 0 | 0 |
+| Request throughput (req/s) | 4.848 | 4.850 | 4.848 |
+| Output throughput (tokens/s) | 77.57 | 77.61 | 77.57 |
+| Goodput (req/s) | 2.569 | 2.619 | 2.279 |
+| Median Submission delay (s) | 0.001 | 0.001 | 0.001 |
+| P95 Submission delay (s) | 0.002 | 0.002 | 0.002 |
+| Median Prefill queue wait (s) | 0.000162 | 0.000171 | 0.000159 |
+| P95 Prefill queue wait (s) | 0.367 | 0.373 | 0.367 |
+| Median TTFT (s) | 0.146 | 0.147 | 0.145 |
+| P95 TTFT (s) | 0.505 | 0.511 | 0.502 |
+| Median TPOT (s) | 0.097 | 0.095 | 0.104 |
+| P95 TPOT (s) | 0.228 | 0.222 | 0.233 |
+| Median End-to-end latency (s) | 1.644 | 1.616 | 1.728 |
+| P95 End-to-end latency (s) | 3.687 | 3.722 | 3.743 |
+
+| Aggregate across passes | Mean | Sample standard deviation |
+| --- | ---: | ---: |
+| Request throughput (req/s) | 4.8489 | 0.0013 |
+| Output throughput (tokens/s) | 77.5823 | 0.0210 |
+| Goodput (req/s) | 2.4891 | 0.1839 |
+
+GPU usage across all three measured passes (sample-weighted utilization means):
+
+| GPU | Role | Mean GPU utilization | Peak GPU utilization | GPU memory used (GiB) | Mean worker busy fraction |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 0 | Prefill | 12.5% | 43% | 5.40 | 33.2% |
+| 1 | Prefill | 14.3% | 44% | 4.89 | 36.3% |
+| 2 | Decode | 25.4% | 38% | 4.73–4.76 | 85.0% |
+| 3 | Decode | 25.7% | 40% | 4.73–4.76 | 86.8% |
+
+GPU memory samples include model weights and allocator memory. GPU utilization
+is sampled by `nvidia-smi`.
+Worker busy fraction measures wall time inside worker operations, including
+CPU work, transfers and synchronization; it is not GPU compute utilization.
+
+| Latency requirement | Pass 1 | Pass 2 | Pass 3 | Total attainment |
+| --- | ---: | ---: | ---: | ---: |
+| TTFT ≤ 2 s | 200/200 | 200/200 | 200/200 | 600/600 (100.0%) |
+| TPOT ≤ 100 ms | 106/200 | 108/200 | 94/200 | 308/600 (51.3%) |
+| E2E ≤ 10 s | 200/200 | 200/200 | 200/200 | 600/600 (100.0%) |
+| All three limits | 106/200 | 108/200 | 94/200 | 308/600 (51.3%) |
+
+All 600 outputs exactly matched uncached CUDA generation. No requests failed
+or remained unfinished, and all workers closed with zero allocated KV blocks.
+Latencies are driver-observed from actual submission; TPOT includes scheduling
+and transfer waits. Measured durations exclude setup, reference generation,
+warm-up and export.
+
+Selected baseline: 5-RPS Poisson arrivals with independent scheduling and
+decode batch size four. Use the frozen `workloads/a100-200-rps5` inputs for
+future controlled comparisons. Preserve the model, precision, GPU allocation,
+capacities, output limits and latency requirements when evaluating changes.
+Only the documented experimental variable should change.
+
+The last request arrives at 40.010 s; mean full-drain duration is 41.247 s.
+Mean throughput is 4.849 requests/s and 77.582 output tokens/s. This finite
+workload does not establish maximum sustainable capacity. All requests meet
+TTFT and E2E limits, but only 308/600 (51.3%) meet the 100-ms TPOT limit.
+This is the chosen engineering baseline, not a 90%-SLO operating point.
+
+The 6-RPS and 8-RPS trials increase throughput but reduce joint SLO attainment
+and goodput. Keep their reports as load-sweep evidence. Low GPU utilization
+with roughly 85–87% decode-worker busy time warrants profiling decode and
+KV-import overhead.
+
+
+## Stage 22 — Prefill work stealing + initial comparison
+
+Status: complete. Work stealing, the enable/disable switch, CPU Ray verification
+and the initial GPU comparison are finished. At the user's request, the earlier
+separate-allocation comparison remains the main Stage 22 result. Its allocation-
+variation caveat remains: it does not isolate a causal speedup from stealing.
+The completed paired run is retained as supplementary evidence, not a pending
+checkpoint. Stage 21's selected baseline is preserved.
+
+- Restored the active launcher to `A100-80GB:4`: two prefill plus two decode
+  replicas, 8 CPUs and 64 GiB host memory. Uses `workloads/a100-200-rps5`, 200
+  Poisson requests, three passes, decode batch four, four warm-up requests,
+  128 KV blocks × 16 tokens per worker and holding capacity four. Per-pass
+  deadlines are disabled; overall Modal timeout remains 600 seconds.
+- Added `stealing_enabled` to the independent Ray coordinator and benchmark API.
+  Modal exposes `--stealing` / `--no-stealing`; disabled remains the default.
+  Output directories default to separate mode-specific names.
+- A source can steal only when it has no outstanding operation and its own
+  waiting queue is empty. Donors are ranked by queued, unstarted prompt tokens;
+  the receiver takes a compatible request from the selected donor's tail.
+  The donor's in-flight prefill head is explicitly excluded. Receiver holding
+  space, free KV blocks, total request capacity and vocabulary are checked.
+- Stealing moves only the immutable, unstarted submission. It creates no KV
+  transfer, resubmission or duplicate metric events. Prefill assignment is
+  recorded at execution; held KV and active decode requests never migrate,
+  and decode ownership remains fixed. Existing pull admission, acknowledgement
+  and failure reconciliation are unchanged.
+- Each measured run records `prefill_assignments`, `steal_count`, and
+  `steal_events` (request id, donor, receiver, prompt tokens, observation time).
+  Warm-up uses a separate coordinator, so its steals do not enter measured logs.
+- `verify_work_stealing.py` passed policy guards plus real CPU Ray checks with
+  stealing disabled/enabled: the enabled peer completes queued donor work while
+  the donor's active prefill is deliberately gated; exact outputs, seeded replay,
+  one observation per output token, fixed decode ownership and full KV cleanup
+  agree across modes. Batch, metrics and system-report regressions passed.
+- Verification: `PYTHONPATH=src uv run python src/verify_work_stealing.py`.
+- Run fresh disabled and enabled measurements on the same frozen inputs and
+  settings. Separate allocations can introduce hardware/runtime variation;
+  compare per-pass distributions as well as aggregate means. A small steal
+  count at 5 RPS is possible; no performance gain is assumed. No GPU job was
+  launched during implementation.
+
+```bash
+modal run src/Modal/run_benchmark.py \
+  --workload-dir workloads/a100-200-rps5 \
+  --decode-batch-size 4 --warmup-requests 4 \
+  --repeats 3 --max-run-seconds 0 --no-stealing \
+  --output results/stage22-a100-80gb-200-rps5-no-stealing
+
+modal run src/Modal/run_benchmark.py \
+  --workload-dir workloads/a100-200-rps5 \
+  --decode-batch-size 4 --warmup-requests 4 \
+  --repeats 3 --max-run-seconds 0 --stealing \
+  --output results/stage22-a100-80gb-200-rps5-stealing
+```
+
+
+### Stage 22 measured comparison: separate GPU allocations
+
+Sources:
+- `results/stage22-a100-80gb-200-rps5-no-stealing/baseline.json`
+- `results/stage22-a100-80gb-200-rps5-stealing/baseline.json`
+
+Both reports have identical source hashes, frozen workload and configuration:
+two prefill plus two decode A100-SXM4 80 GB GPUs, 200 Poisson requests at 5 RPS,
+three passes, float32, decode batch four, four warm-up requests, 128 KV blocks
+and holding capacity four. They were collected in separate allocations.
+
+| Metric | No stealing | Stealing |
+| --- | ---: | ---: |
+| Mean full-drain duration (s) | 41.712 | 40.865 |
+| Request throughput (req/s) | 4.795 | 4.894 |
+| Output throughput (tokens/s) | 76.716 | 78.306 |
+| Goodput (req/s) | 0.439 | 4.331 |
+| Median TTFT (s) | 0.165 | 0.068 |
+| P95 TTFT (s) | 0.609 | 0.345 |
+| Median TPOT (s) | 0.253 | 0.057 |
+| P95 TPOT (s) | 0.353 | 0.134 |
+| Median End-to-end latency (s) | 4.012 | 0.961 |
+| P95 End-to-end latency (s) | 5.620 | 2.195 |
+| Median Prefill queue wait (s) | 0.000 | 0.000 |
+| P95 Prefill queue wait (s) | 0.439 | 0.088 |
+| Exact output matches | 600/600 | 600/600 |
+| Failed / unfinished requests | 0 / 0 | 0 / 0 |
+| All workers closed with KV released | Yes | Yes |
+
+Latencies are means of per-pass percentiles; rates are means across passes.
+
+| Pass | No-stealing duration (s) | Stealing duration (s) | Steals | No-stealing joint SLO passes | Stealing joint SLO passes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 41.661 | 40.870 | 88 | 17/200 | 176/200 |
+| 2 | 41.658 | 40.861 | 91 | 15/200 | 178/200 |
+| 3 | 41.818 | 40.865 | 85 | 23/200 | 177/200 |
+| Total | — | — | 264 | 55/600 (9.2%) | 531/600 (88.5%) |
+
+Joint SLO limits: TTFT ≤ 2 s, TPOT ≤ 100 ms and E2E ≤ 10 s. All 600 requests
+in each mode meet TTFT and E2E; TPOT determines joint attainment.
+
+| GPU / role | No-stealing mean GPU utilization | Stealing mean GPU utilization |
+| --- | ---: | ---: |
+| GPU 0 / Prefill | 13.3% | 16.0% |
+| GPU 1 / Prefill | 15.3% | 8.8% |
+| GPU 2 / Decode | 22.5% | 28.8% |
+| GPU 3 / Decode | 22.9% | 27.6% |
+
+GPU utilization is sampled by nvidia-smi, not worker wall-time busy fraction.
+
+| Mean worker operation time | No stealing | Stealing |
+| --- | ---: | ---: |
+| Prefill | 155.22 ms | 103.76 ms |
+| KV import | 123.29 ms | 79.62 ms |
+| Decode batch | 58.75 ms | 33.20 ms |
+
+Interpretation: stealing moved 264 unstarted submissions across three passes.
+Throughput increased about 2.1%, while median TTFT/TPOT/E2E and joint SLO
+attainment improved substantially. Outputs match across modes and every pass
+drained cleanly. However, per-operation execution times also differ strongly
+between allocations. These measurements demonstrate working stealing and an
+observed performance difference; they do not isolate the causal speedup from
+stealing. The new same-allocation comparison below controls physical allocation
+and actor lifetime. The enabled result reaches 88.5% joint attainment, below 90%.
+
+### Same-allocation comparison prepared
+
+- Added `--compare-stealing`. One remote invocation loads the model/actors once
+  and runs three passes per mode on the same four GPUs. Order for three pairs:
+  off, on, on, off, off, on. Each pass gets fresh warm-up, scheduling queues and
+  metrics; all workers must drain and release KV before the next pass.
+- `--repeats 3` means three passes per mode (six measured passes total). The
+  overall 600-second timeout remains unchanged; no GPU trial was launched here.
+- Combined `baseline.json` contains `comparison_order`, per-run mode labels,
+  and separate `comparison.no-stealing` / `comparison.stealing` aggregates.
+  Root aggregate fields are empty in paired mode to avoid mixing both modes.
+- CPU Ray verification passed six alternating passes with the same actor PIDs,
+  equal outputs, separate per-mode summaries and complete KV cleanup. Existing
+  system-report regression checks passed.
+
+```bash
+PYTHONPATH=src uv run python src/verify_paired.py
+modal run src/Modal/run_benchmark.py \
+  --compare-stealing --repeats 3 \
+  --workload-dir workloads/a100-200-rps5 \
+  --decode-batch-size 4 --warmup-requests 4 --max-run-seconds 0 \
+  --output results/stage22-a100-80gb-200-rps5-paired
+```
 
 ## Roadmap
 
@@ -894,7 +1204,7 @@ GPU baseline verification on October 18, 2026:
 | 19 | Mixed request workload | Short, medium, and long prompts that imbalance prefill work; freeze a benchmark workload. | Complete |
 | 20 | Multiple decode workers | Simple placement; keep each request on its assigned decode worker. | Complete |
 | 21 | Metrics + baseline benchmark | Instrument TTFT, TPOT, E2E, prefill wait, throughput, goodput, GPU utilization, idle time, queue length, and KV occupancy; save a no-stealing baseline before implementing stealing. | Complete |
-| 22 | Prefill work stealing + initial comparison | Steal unstarted whole requests; add an enable/disable switch; replay the frozen workload in both modes with identical configuration. | Pending |
+| 22 | Prefill work stealing + initial comparison | Steal unstarted whole requests; add an enable/disable switch; replay the frozen workload in both modes with identical configuration. | Complete |
 | 23 | Modal deployment | Start with one prefill GPU and one decode GPU; scale as necessary. | Pending |
 | 24 | Final benchmark | Repeat the controlled stealing-disabled/enabled comparison on the final system; analyze performance and correctness against the saved baseline. | Pending |
 | 25 | Cleanup + report | Simplify code; document architecture, results, limitations, and RDMA/FlashInfer/TP future work. | Pending |
@@ -955,3 +1265,201 @@ Passed locally on macOS with Python 3.11.9:
 - `git check-ignore .venv dist`: environment and build artifacts are ignored.
 
 No model download, inference, or GPU correctness checks were performed at stage 0.
+
+## Lower-load A100 comparison prepared
+
+- Prepared `workloads/a100-200-rps2/` on October 19, 2026 for one measured pass
+  with a 150-second soft limit. All 200 request inputs/order and 16-token output
+  limits match the completed 4-RPS experiment. Poisson offsets are exactly twice
+  the originals; the final scheduled arrival is at 100.024 seconds.
+- Checksums and per-request equivalence passed. Hardware, KV/holding capacity,
+  warm-up and latency thresholds remain unchanged through explicit CLI settings.
+  No GPU job was launched during preparation.
+- Inspected locally saved baseline reports: the T4 100-request 2-RPS baseline,
+  A100 200-request 4-RPS baseline, and six-request CPU smoke all use Poisson
+  arrivals. Constant schedules are covered by verification, not these reports.
+
+## A100 40 GB hardware comparison prepared
+
+- Changed only the benchmark GPU variant to explicit `A100-40GB:4` (two prefill,
+  two decode), matching the user's cost-comparison request. Updated the runtime
+  minimum-memory check from 75 to 35 GiB and the displayed base GPU cost estimate
+  to $0.000583/GPU/s. Actual GPU identities/memory remain recorded.
+- Reuses `workloads/a100-200-rps4/` unchanged: 200 Poisson requests at 4 RPS,
+  16 output tokens, three passes with 90-second soft limits, 128 KV blocks,
+  holding capacity four, four warm-up requests and a 600-second function timeout.
+- New default output is `results/stage21-a100-40gb-200-rps4`, preserving the
+  completed 80-GB report. Mocked launcher checks verified the GPU request,
+  memory guard, workload, capacities and limits without launching GPU work.
+- Run `modal run src/Modal/run_benchmark.py --repeats 3 --max-run-seconds 90
+  --output results/stage21-a100-40gb-200-rps4` as one command. Results pending.
+
+## A100 40 GB full-drain rerun prepared
+
+- At the user's request, removed the default 90-second per-pass stop.
+  `--max-run-seconds 0` (now the default) passes no replay deadline and bypasses
+  the measured-budget guard. Positive limits retain the 270-second total guard.
+- Three passes, 200 Poisson requests at 4 RPS, 16 output tokens, four A100 40 GB
+  replicas and engine capacities are unchanged. The 600-second Modal function
+  timeout still covers setup and all passes; a hard timeout can prevent export.
+- New default output: `results/stage21-a100-40gb-200-rps4-drained`, preserving
+  the partial 95/200-request report. Mocked launcher checks passed unbounded and
+  explicit bounded modes; no GPU job was launched.
+
+## Benchmark hardware decision: A100 80 GB
+
+- User selected A100 80 GB for current and future performance benchmarks.
+  Use two prefill and two decode replicas by default. T4 remains validation
+  hardware; A100 40 GB results remain historical comparisons.
+- Restored explicit `A100-80GB:4`, the 75-GiB minimum GPU-memory check, and
+  matching GPU-only pricing display in `src/Modal/run_benchmark.py`.
+- Default output: `results/stage21-a100-80gb-200-rps4-drained`, preserving all
+  previous reports. Workload and runtime settings are unchanged: 200 Poisson
+  requests at 4 RPS, 16 output tokens, three passes, no per-pass deadline,
+  128 KV blocks, holding capacity four, four warm-up requests and a 600-second
+  Modal function timeout covering setup and all passes.
+- Launcher compilation/help checks passed. No GPU job was launched.
+
+
+## Decode batching before work stealing
+
+- Added continuous decode batching to local and Ray multi-decode coordinators.
+  `decode_batch_size` defaults to one for the serial reference; use four for
+  the next benchmark. Each decode worker runs up to four active requests in
+  one model forward per tick, then rotates those requests through its queue.
+  Requests enter and leave batches dynamically without waiting to fill them.
+- Batched decode retains separate paged KV ownership and RoPE positions for
+  each request. KV reads are padded to the longest history in that batch and
+  padding is masked in attention. This implementation still gathers KV in
+  Python and uses dense attention; it does not introduce a fused paged kernel.
+  Prefill remains unbatched and request placement remains fixed.
+- Finished requests release their own KV. Capacity rejection preserves all
+  selected requests; a partial model-forward failure retires selected caches
+  and preserves unrelated requests. Metrics observe each output token once.
+- Reports now include configured `decode_batch_size` and each worker's
+  `decode_batch_sizes` histogram (batch size -> successful decode calls).
+  Warm-up counts are reset before each measured pass.
+- CPU runner, worker, scheduling, metrics, system-report and dedicated batch
+  checks passed. The dedicated check also passed with four real CPU Ray actors.
+  GPU speed and exact-output agreement remain to be measured on A100 80 GB.
+- Run `PYTHONPATH=src uv run python src/verify_decode_batch.py --ray` to verify.
+- Next benchmark (one command):
+  `modal run src/Modal/run_benchmark.py --workload-dir workloads/a100-200-rps4 --decode-batch-size 4 --repeats 3 --max-run-seconds 0 --output results/stage21-a100-80gb-200-rps4-batch4`
+- Retains four A100 80 GB GPUs (two prefill, two decode), 200 Poisson requests
+  at 4 RPS, 16 output tokens, 128 KV blocks/worker and all existing goodput
+  limits. Per-pass deadlines remain disabled; the overall Modal timeout is
+  still 600 seconds. Prior baseline artifacts are preserved. No GPU job was launched.
+
+
+## Independent prefill and decode execution
+
+- Added `IndependentRayCoordinator` for the multi-GPU benchmark. It tracks one
+  outstanding operation per worker and processes ready Ray results without a
+  global decode/transfer/prefill barrier. Separate actors can run prefill,
+  decode batches and KV handoff concurrently. Ordinary local workers remain
+  the serial CPU reference.
+- Submission and admission use cached actor metadata/capacity. Each completed
+  operation returns an updated worker snapshot; only idle actors are scheduled
+  from those snapshots. Actors must be exclusively owned by the coordinator.
+  Driver steps wait at most 2 ms for a ready result, keeping arrival replay and
+  deadline checks responsive (driver overhead is additional).
+- KV export refs pass directly to destination actors, retaining the existing
+  CPU snapshot transport without pulling payloads into the controller. Source
+  KV is released only after import acknowledgement. Capacity reserves the full
+  decode budget, ownership remains fixed, and imports alternate with decode
+  batches while a target has active requests to prevent admission starvation.
+- Successful imports remain tracked through source-release retries. Failed
+  decode caches are reconciled from returned actor state; unrelated workers
+  remain schedulable. Unknown actor/task outcomes stop further dispatch and
+  require caller cleanup rather than blindly retrying an import.
+- Periodic system telemetry uses last completed-operation snapshots, including
+  snapshot age and operation-in-flight flags; it does not enqueue blocking
+  telemetry RPCs behind busy actors. Final telemetry remains authoritative.
+  GPU utilization still comes from the independent nvidia-smi sampler.
+- Modal uses independent scheduling exclusively; the execution-policy option
+  and previous benchmark selection branch have been removed. Reports identify
+  the scheduler. Warm-up drains the new event-driven
+  coordinator with a 60-second limit before measured work begins.
+- Real CPU Ray verification passed: decoders and peer prefill complete while
+  another prefill is deliberately gated; exact outputs, one metric observation
+  per token, immediate completion, bounded holding/KV pressure, actor reuse,
+  source-release retries, partial decode failure reconciliation and deadline
+  cleanup all passed. Existing batch, metrics, scheduling and system checks
+  also passed. The user subsequently completed the GPU benchmark; see the
+  independent scheduling result table above.
+- Verification: `PYTHONPATH=src uv run python src/verify_independent.py`.
+- Benchmark (one command):
+  `modal run src/Modal/run_benchmark.py --workload-dir workloads/a100-200-rps4 --decode-batch-size 4 --repeats 3 --max-run-seconds 0 --output results/stage21-a100-80gb-200-rps4-independent-batch4`
+- Keeps two prefill and two decode A100 80 GB replicas, the frozen 200-request
+  4-RPS Poisson workload, existing capacities and a 600-second overall Modal
+  timeout. Per-pass limits remain disabled. Compare with the earlier phased
+  batch-four result; all previous reports are preserved.
+
+
+## Independent scheduling is the only GPU benchmark path
+
+- Removed the execution-policy argument from the Modal CLI and benchmark API.
+  GPU runs always construct `IndependentRayCoordinator`. Existing historical
+  artifacts are preserved; ordinary CPU workers remain a serial correctness
+  reference. No GPU benchmark was launched for this cleanup.
+- Updated current commands and documentation. Reports still describe the
+  actual execution mechanism for provenance; it is no longer selectable.
+
+
+## Eight-GPU scaling trial prepared: 4 prefill + 4 decode at 10 RPS
+
+- User requested four A100 prefill replicas and four A100 decode replicas.
+  Retained A100 80 GB. Doubled Poisson arrival rate from the selected baseline's
+  5 RPS to 10 RPS, preserving nominal load per replica. The selected 2+2/5-RPS
+  baseline table and artifacts remain unchanged; this is a scaling experiment.
+- Generalized benchmark worker counts, source/target slicing, CPU/Ray resources,
+  visible-GPU/process placement checks and report configuration. The Modal
+  launcher requests `A100-80GB:8`, 16 CPUs and 128 GiB host memory, and supplies
+  four prefill plus four decode replicas to the independent coordinator.
+- Prepared `workloads/a100-200-rps10`; hashes and request contents verified
+  against 5 RPS, with every arrival offset halved. Frozen manifest records
+  four-source round-robin prompt totals. Added `--num-prefill-workers` to the
+  freezer for reproducible metadata; existing defaults remain two.
+- Keeps 200 requests, three passes, float32, 16 output tokens, decode batch four,
+  128 KV blocks × 16 tokens per worker and holding capacity four. Warm-up grows
+  to eight requests for the larger layout. Last arrival is 20.005 seconds;
+  this finite trial has a shorter arrival window than the 5-RPS baseline.
+- No per-pass deadline; overall Modal timeout remains 600 seconds. Displayed
+  GPU-only estimate doubles to about $0.33/minute at the launcher's stored rate;
+  setup and CPU/memory billing are additional. No GPU job was launched here.
+- CPU eight-worker benchmark and real eight-actor Ray checks passed exact
+  outputs, all four decoder assignments, per-token metrics and KV cleanup.
+  Verification command: `PYTHONPATH=src uv run python src/verify_independent.py
+  --workers-per-role 4` (one command).
+- Run `modal run src/Modal/run_benchmark.py --workload-dir workloads/a100-200-rps10
+  --decode-batch-size 4 --warmup-requests 8 --repeats 3 --max-run-seconds 0
+  --output results/stage21-a100-80gb-4p4d-200-rps10-batch4` as one command.
+  GPU results pending.
+
+
+## Eight-GPU availability fallback: A100 40 GB
+
+- At the user's request, switched the active 4-prefill/4-decode scaling trial
+  from `A100-80GB:8` to `A100-40GB:8` after difficulty obtaining eight 80-GB GPUs.
+  Reduced the minimum GPU-memory check from 75 to 35 GiB; actual GPU identity
+  and memory remain recorded. The selected 2+2 A100 80 GB / 5-RPS baseline is
+  preserved. This hardware change makes the new trial a hardware-and-replica
+  comparison rather than an isolated scaling measurement.
+- Kept 10 RPS, the same frozen 200 requests, decode batch four, three passes,
+  eight warm-up requests, per-worker capacities, 16 CPUs, 128 GiB host memory
+  and the 600-second overall timeout. Per-pass deadlines remain disabled.
+- Updated default output to `results/stage21-a100-40gb-4p4d-200-rps10-batch4`.
+  Updated the displayed estimate using Modal's published $0.000583/GPU/s rate:
+  about $0.28/minute for eight GPUs, or $2.80 GPU-only for 600 seconds. Other
+  billing is additional; this is not a cap or an availability guarantee.
+- Launcher compilation and CLI-help checks passed. No GPU job was launched.
+- Command: `modal run src/Modal/run_benchmark.py --workload-dir workloads/a100-200-rps10 --decode-batch-size 4 --warmup-requests 8 --repeats 3 --max-run-seconds 0 --output results/stage21-a100-40gb-4p4d-200-rps10-batch4`.
+
+
+## Eight-GPU trial deferred; restored the selected baseline layout
+
+- User deferred the eight-A100 experiment. The active launcher is again two
+  prefill plus two decode A100 80 GB replicas at 5 RPS, with four warm-up
+  requests. Eight-GPU workload files and historical reports are preserved.
+- Current work is Stage 22; use its disabled/enabled commands above. A100 40 GB
+  and eight-GPU instructions earlier in this document describe deferred trials.
