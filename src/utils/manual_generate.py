@@ -2,9 +2,9 @@ import argparse
 
 from transformers import AutoTokenizer
 
-from generation import generate_greedy
-from hf_reference import choose_device
-from load_model import MODEL_ID, REVISION, load_model
+from utils.generation import generate_greedy
+from utils.hf_reference import choose_device
+from utils.load_model import MODEL_ID, REVISION, load_model
 
 
 def main() -> None:

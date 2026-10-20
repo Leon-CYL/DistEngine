@@ -14,7 +14,7 @@ def source_identity(root):
 
 
 def frozen_inputs(root, directory=None):
-    directory = Path(directory) if directory is not None else Path("workloads/stage19")
+    directory = Path(directory) if directory is not None else Path("workloads/baseline")
     if not directory.is_absolute():
         directory = root / directory
     texts = {name: (directory / name).read_text() for name in
@@ -32,5 +32,3 @@ def save_report(report, directory):
     for run in report["runs"]:
         (directory / f"run-{run['run']:02d}.json").write_text(json.dumps(run, indent=2, allow_nan=False) + "\n")
     (directory / "baseline.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-
-

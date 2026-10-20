@@ -32,7 +32,8 @@ def generate_workload(
     """Generate arrivals in seconds relative to replay start.
 
     Constant arrivals start at zero. Poisson arrivals start after the first
-    exponential gap. Randomness is local and reproducible for a given seed.
+    exponential gap.
+    Randomness is local and reproducible for a given seed.
     """
     if arrival_mode not in ("constant", "poisson"):
         raise ValueError("arrival_mode must be 'constant' or 'poisson'")
@@ -74,7 +75,7 @@ def generate_workload(
     for index in range(num_requests):
         if arrival_mode == "constant":
             arrival_offset_s = index / rate_rps
-        else:
+        elif arrival_mode == "poisson":
             arrival_offset_s += rng.expovariate(rate_rps)
 
         if not math.isfinite(arrival_offset_s):

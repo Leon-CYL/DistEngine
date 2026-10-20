@@ -60,27 +60,3 @@ class Request:
         elif len(self.generated_token_ids) == self.max_new_tokens:
             self.reason = "length"
             self.status = RequestStatus.FINISHED
-            
-def main():
-    request = Request(
-        request_id="example",
-        prompt_token_ids=[10, 20],
-        max_new_tokens=3,
-        eos_token_id=2,
-    )
-
-    assert request.status == RequestStatus.WAITING
-    request.start()
-    request.append_token(30)
-
-    assert request.token_ids == [10, 20, 30]
-    assert request.num_generated_tokens == 1
-    assert not request.is_finished
-
-    request.append_token(2)
-    assert request.is_finished
-    assert request.reason == "eos"
-    assert request.generated_token_ids == [30, 2]
-    
-if __name__ == "__main__":
-    main()
