@@ -42,21 +42,9 @@ class RequestTiming:
                 if self.prefill_dispatched_s is not None
                 else None
             ),
-            "ttft_s": (
-                first - self.submitted_s
-                if first is not None
-                else None
-            ),
-            "e2e_s": (
-                self.finished_s - self.submitted_s
-                if self.finished_s is not None
-                else None
-            ),
-            "tpot_s": (
-                (last - first) / (len(tokens) - 1)
-                if len(tokens) > 1
-                else None
-            ),
+            "ttft_s": (first - self.submitted_s if first is not None else None),
+            "e2e_s": (self.finished_s - self.submitted_s if self.finished_s is not None else None),
+            "tpot_s": ((last - first) / (len(tokens) - 1) if len(tokens) > 1 else None),
             "error": self.error,
         }
 
@@ -71,10 +59,7 @@ def percentile(values: list[float], fraction: float) -> float | None:
     lower = math.floor(position)
     upper = math.ceil(position)
 
-    return (
-        ordered[lower]
-        + (ordered[upper] - ordered[lower]) * (position - lower)
-    )
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
 class MetricsRecorder:
@@ -83,9 +68,12 @@ class MetricsRecorder:
     Replay shares started_at/clock and freezes the report window on success.
     Actor execution and GPU utilization require separate instrumentation.
     """
+
     def __init__(
-        self, clock: Callable[[], float] = time.perf_counter,
-        *, started_at: float | None = None,
+        self,
+        clock: Callable[[], float] = time.perf_counter,
+        *,
+        started_at: float | None = None,
     ):
         self.clock = clock
         self.started_at = clock() if started_at is None else started_at
@@ -108,10 +96,12 @@ class MetricsRecorder:
     def orchestration_failed(self, error: Exception) -> None:
         """An orchestration error does not necessarily retire a request."""
         self._ensure_open()
-        self.orchestration_errors.append({
-            "observed_s": self.elapsed(),
-            "error": f"{type(error).__name__}: {error}",
-        })
+        self.orchestration_errors.append(
+            {
+                "observed_s": self.elapsed(),
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
 
     def submitted(self, request_id: str, scheduled_s: float) -> None:
         self._ensure_open()
@@ -189,9 +179,7 @@ class MetricsRecorder:
         successful = [
             row
             for row in rows
-            if row["e2e_s"] is not None
-            and row["error"] is None
-            and row["output_tokens"] > 0
+            if row["e2e_s"] is not None and row["error"] is None and row["output_tokens"] > 0
         ]
 
         good = [
@@ -199,10 +187,7 @@ class MetricsRecorder:
             for row in successful
             if row["ttft_s"] <= limits.ttft_s
             and row["e2e_s"] <= limits.e2e_s
-            and (
-                row["tpot_s"] is None
-                or row["tpot_s"] <= limits.tpot_s
-            )
+            and (row["tpot_s"] is None or row["tpot_s"] <= limits.tpot_s)
         ]
 
         distributions = {}
@@ -213,11 +198,7 @@ class MetricsRecorder:
             "tpot_s",
             "e2e_s",
         ):
-            values = [
-                row[name]
-                for row in successful
-                if row[name] is not None
-            ]
+            values = [row[name] for row in successful if row[name] is not None]
             distributions[name] = {
                 "count": len(values),
                 "p50": percentile(values, 0.50),
@@ -232,24 +213,15 @@ class MetricsRecorder:
             "completed": len(successful),
             "failed": sum(row["error"] is not None for row in rows),
             "unfinished": sum(row["e2e_s"] is None for row in rows),
-            "request_throughput_rps": (
-                len(successful) / duration if duration > 0 else None
-            ),
+            "request_throughput_rps": (len(successful) / duration if duration > 0 else None),
             "completed_output_tokens_per_s": (
-                sum(row["output_tokens"] for row in successful) / duration
-                if duration > 0
-                else None
+                sum(row["output_tokens"] for row in successful) / duration if duration > 0 else None
             ),
-            "goodput_rps": (
-                len(good) / duration if duration > 0 else None
-            ),
+            "goodput_rps": (len(good) / duration if duration > 0 else None),
             "goodput_limits": asdict(limits),
             "latencies": distributions,
             "requests": rows,
-            "raw_timings": [
-                asdict(timing)
-                for timing in self.requests.values()
-            ],
+            "raw_timings": [asdict(timing) for timing in self.requests.values()],
             "orchestration_errors": [dict(item) for item in self.orchestration_errors],
         }
 

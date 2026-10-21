@@ -38,9 +38,16 @@ class Coordinator(_MetricsHooks):
     independent execution. Both paths support batching and optional stealing.
     """
 
-    def __init__(self, sources: Iterable[Any], targets: Iterable[Any], *,
-                 metrics: MetricsRecorder | None = None, decode_batch_size=1,
-                 poll_timeout_s=.002, stealing_enabled=False):
+    def __init__(
+        self,
+        sources: Iterable[Any],
+        targets: Iterable[Any],
+        *,
+        metrics: MetricsRecorder | None = None,
+        decode_batch_size=64,
+        poll_timeout_s=0.002,
+        stealing_enabled=True,
+    ):
         if type(stealing_enabled) is not bool:
             raise ValueError("stealing_enabled must be a boolean")
         self.stealing_enabled = stealing_enabled
@@ -61,8 +68,9 @@ class Coordinator(_MetricsHooks):
         self._local = all(local)
         self._states: list[dict[str, Any]]
         if self._local:
-            if (any(not isinstance(w, PrefillWorker) for w in self.sources)
-                    or any(not isinstance(w, DecodeWorker) for w in self.targets)):
+            if any(not isinstance(w, PrefillWorker) for w in self.sources) or any(
+                not isinstance(w, DecodeWorker) for w in self.targets
+            ):
                 raise ValueError("Workers must match their prefill/decode roles")
             if len({id(w) for w in workers}) != len(workers):
                 raise ValueError("All workers must be distinct")
@@ -72,7 +80,9 @@ class Coordinator(_MetricsHooks):
                 raise ValueError("Prefill workers must have independent holding pools")
             self._states = [scheduled_state(w) for w in workers]
         else:
-            state_refs: list[ray.ObjectRef[dict[str, Any]]] = [w.scheduled_state.remote() for w in workers]
+            state_refs: list[ray.ObjectRef[dict[str, Any]]] = [
+                w.scheduled_state.remote() for w in workers
+            ]
             identity_refs: list[ray.ObjectRef[dict[str, Any]]] = [w.ready.remote() for w in workers]
             self._states = ray.get(state_refs)
             identities = ray.get(identity_refs)
@@ -80,12 +90,23 @@ class Coordinator(_MetricsHooks):
                 raise ValueError("All actors must be distinct")
         if any(w["closed"] for w in self._states):
             raise RuntimeError("Worker is closed")
-        if any(w["active_request_ids"] or w["num_free_blocks"] != w["num_blocks"]
-               or w["held_requests"] for w in self._states):
+        if any(
+            w["active_request_ids"] or w["num_free_blocks"] != w["num_blocks"] or w["held_requests"]
+            for w in self._states
+        ):
             raise ValueError("Coordinator requires fresh, drained workers")
-        if (any(w["role"] != "PrefillWorker" for w in self._states[:len(self.sources)])
-                or any(w["role"] != "DecodeWorker" for w in self._states[len(self.sources):])):
+        if any(w["role"] != "PrefillWorker" for w in self._states[: len(self.sources)]) or any(
+            w["role"] != "DecodeWorker" for w in self._states[len(self.sources) :]
+        ):
             raise ValueError("Workers must match their prefill/decode roles")
+        transports = {state.get("kv_transport", "cpu") for state in self._states}
+        if len(transports) != 1:
+            raise ValueError("All workers must use the same KV transport")
+        self.kv_transport = transports.pop()
+        if self.kv_transport == "nccl" and self._local:
+            raise ValueError(
+                "NCCL transport requires Ray actors and an initialized collective group"
+            )
         self.metrics = metrics
         self.decode_batch_size = decode_batch_size
         self.poll_timeout_s = poll_timeout_s
@@ -95,11 +116,17 @@ class Coordinator(_MetricsHooks):
         self.seen_ids: set[str] = set()
         self.decode_assignments: dict[str, int] = {}
         self.pending_releases: dict[str, int] = {}
+        self.handoff_events: list[dict[str, Any]] = []
+        self._handoff_started: dict[str, float] = {}
         self.next_submit = self.next_pull = self.next_target = 0
         self._observed_at = [time.perf_counter()] * len(self._states)
         self._busy: dict[int, OperationRef] = {}  # global worker index -> operation ref
-        self._operations: dict[OperationRef, tuple[int, str, Any]] = {}  # ref -> (worker index, operation, context)
-        self._transfers: dict[str, tuple[int, int]] = {}  # request id -> (source index, target index)
+        self._operations: dict[
+            OperationRef, tuple[int, str, Any]
+        ] = {}  # ref -> (worker index, operation, context)
+        self._transfers: dict[
+            str, tuple[int, int]
+        ] = {}  # request id -> (source index, target index)
         self._last_target_operation: list[str | None] = [None] * len(self.targets)
         self._fatal_error: Exception | None = None
 
@@ -107,7 +134,8 @@ class Coordinator(_MetricsHooks):
         if self._fatal_error is not None:
             raise self._fatal_error
         if any(state["closed"] for state in self._states) or (
-                self._local and any(w.closed for w in (*self.sources, *self.targets))):
+            self._local and any(w.closed for w in (*self.sources, *self.targets))
+        ):
             raise RuntimeError("Worker is closed")
 
     def drain_completed(self):
@@ -124,7 +152,7 @@ class Coordinator(_MetricsHooks):
     ) -> None:
         """Validate and enqueue a copied submission without allocating KV."""
         self._check_open()
-        metadata = (self._states[self.next_submit], *self._states[len(self.sources):])
+        metadata = (self._states[self.next_submit], *self._states[len(self.sources) :])
 
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("request_id must be a nonempty string")
@@ -168,14 +196,20 @@ class Coordinator(_MetricsHooks):
     def cached_workers(self):
         """Last completed-operation snapshots; sampling never waits on actors."""
         now = time.perf_counter()
-        return [dict(state, snapshot_age_s=now - observed,
-                     operation_in_flight=index in self._busy)
-                for index, (state, observed) in enumerate(zip(self._states, self._observed_at))]
+        return [
+            dict(state, snapshot_age_s=now - observed, operation_in_flight=index in self._busy)
+            for index, (state, observed) in enumerate(zip(self._states, self._observed_at))
+        ]
 
     def has_pending(self):
-        return bool(self._operations or self._transfers or self.pending_releases
-                    or any(self.waiting) or any(self.decode_ready)
-                    or any(s.get("held_descriptors") for s in self._states[:len(self.sources)]))
+        return bool(
+            self._operations
+            or self._transfers
+            or self.pending_releases
+            or any(self.waiting)
+            or any(self.decode_ready)
+            or any(s.get("held_descriptors") for s in self._states[: len(self.sources)])
+        )
 
     def _launch(self, index: int, operation: str, context: Any, *args: Any) -> OperationRef:
         if index in self._busy:
@@ -185,14 +219,22 @@ class Coordinator(_MetricsHooks):
         if self._local:
             ref = Future[dict[str, Any]]()
             try:
-                envelope = (import_scheduled(worker, args[0].result()) if operation == "import"
-                            else run_scheduled(worker, operation, *args))
+                envelope = (
+                    import_scheduled(worker, args[0].result())
+                    if operation == "import"
+                    else run_scheduled(worker, operation, *args)
+                )
                 ref.set_result(envelope)
             except Exception as exc:
                 ref.set_exception(exc)
         else:
-            ref = (worker.scheduled_import.remote(*args) if operation == "import"
-                   else worker.scheduled.remote(operation, *args))
+            ref = (
+                worker.scheduled_import.remote(*args)
+                if operation == "import"
+                else worker.scheduled.options(tensor_transport="nccl").remote(operation, *args)
+                if operation == "export_request" and self.kv_transport == "nccl"
+                else worker.scheduled.remote(operation, *args)
+            )
         self._busy[index] = ref
         self._operations[ref] = (index, operation, context)
         return ref
@@ -251,6 +293,16 @@ class Coordinator(_MetricsHooks):
                             self._record_retired(rid, error)
             elif operation == "import":
                 source, target = self._transfers.pop(context)
+                self.handoff_events.append(
+                    {
+                        "request_id": context,
+                        "source": source,
+                        "target": target,
+                        "transport": self.kv_transport,
+                        "duration_s": time.perf_counter() - self._handoff_started.pop(context),
+                        "success": error is None,
+                    }
+                )
                 if error is None:
                     self.decode_assignments[context] = target
                     self.decode_ready[target].append(context)
@@ -268,11 +320,13 @@ class Coordinator(_MetricsHooks):
         size = state["block_size"]
         blocks = (len(request.prompt_token_ids) + size - 1) // size
         maximum = len(request.prompt_token_ids) + request.max_new_tokens - 1
-        return (not state["closed"]
-                and maximum <= state["num_blocks"] * size
-                and all(0 <= token < state["vocab_size"] for token in request.prompt_token_ids)
-                and state["held_requests"] < state["max_held_requests"]
-                and blocks <= state["num_free_blocks"])
+        return (
+            not state["closed"]
+            and maximum <= state["num_blocks"] * size
+            and all(0 <= token < state["vocab_size"] for token in request.prompt_token_ids)
+            and state["held_requests"] < state["max_held_requests"]
+            and blocks <= state["num_free_blocks"]
+        )
 
     def _steal_prefill(self, receiver):
         """Move one unstarted whole request to an idle, empty source queue.
@@ -288,18 +342,27 @@ class Coordinator(_MetricsHooks):
             if donor == receiver:
                 continue
             unstarted = [r for r in queue if r.request_id not in self._prefill_started]
-            eligible = next((r for r in reversed(unstarted)
-                             if self._can_start_prefill(receiver, r)), None)
+            eligible = next(
+                (r for r in reversed(unstarted) if self._can_start_prefill(receiver, r)), None
+            )
             if eligible is not None:
-                candidates.append((sum(len(r.prompt_token_ids) for r in unstarted), donor, eligible))
+                candidates.append(
+                    (sum(len(r.prompt_token_ids) for r in unstarted), donor, eligible)
+                )
         if not candidates:
             return
         _, donor, request = max(candidates, key=lambda item: (item[0], -item[1]))
         self.waiting[donor].remove(request)
         self.waiting[receiver].append(request)
-        self.steal_events.append({"request_id": request.request_id, "from_source": donor,
-                                  "to_source": receiver, "prompt_tokens": len(request.prompt_token_ids),
-                                  "observed_s": self.metrics.elapsed() if self.metrics is not None else None})
+        self.steal_events.append(
+            {
+                "request_id": request.request_id,
+                "from_source": donor,
+                "to_source": receiver,
+                "prompt_tokens": len(request.prompt_token_ids),
+                "observed_s": self.metrics.elapsed() if self.metrics is not None else None,
+            }
+        )
 
     def _dispatch_available(self):
         count = len(self.sources)
@@ -326,8 +389,15 @@ class Coordinator(_MetricsHooks):
                     if source in self._busy:
                         continue
                     held = self._states[source]["held_descriptors"]
-                    candidate = next((d for d in held if d["request_id"] not in self._transfers
-                                      and d["request_id"] not in self.pending_releases), None)
+                    candidate = next(
+                        (
+                            d
+                            for d in held
+                            if d["request_id"] not in self._transfers
+                            and d["request_id"] not in self.pending_releases
+                        ),
+                        None,
+                    )
                     if candidate is None:
                         continue
                     tokens = candidate["num_prompt_tokens"] + candidate["max_new_tokens"] - 1
@@ -339,12 +409,13 @@ class Coordinator(_MetricsHooks):
                 source, descriptor = selected
                 rid = descriptor["request_id"]
                 self._transfers[rid] = (source, target)
+                self._handoff_started[rid] = time.perf_counter()
                 exported = self._launch(source, "export_request", rid, rid)
                 self._launch(index, "import", rid, exported)
                 self._last_target_operation[target] = "import"
                 self.next_pull = (source + 1) % count
             elif queue:
-                ids = list(queue)[:self.decode_batch_size]
+                ids = list(queue)[: self.decode_batch_size]
                 operation = "step" if self.decode_batch_size == 1 else "step_batch"
                 self._launch(index, operation, ids, ids[0] if operation == "step" else ids)
                 self._last_target_operation[target] = "decode"
@@ -360,19 +431,31 @@ class Coordinator(_MetricsHooks):
                 self._prefill_started.add(request.request_id)
                 self.prefill_assignments[request.request_id] = source
                 self._record_prefill_dispatch(request.request_id)
-                self._launch(source, "prefill", request.request_id, request.request_id,
-                             list(request.prompt_token_ids), request.max_new_tokens, request.eos_token_id)
+                self._launch(
+                    source,
+                    "prefill",
+                    request.request_id,
+                    request.request_id,
+                    list(request.prompt_token_ids),
+                    request.max_new_tokens,
+                    request.eos_token_id,
+                )
 
     def _wait(self, count: int, timeout: float) -> tuple[list[OperationRef], list[OperationRef]]:
         refs = list(self._operations)
         if self._local:
             return refs[:count], refs[count:]
         actor_refs: list[ray.ObjectRef | ray.ObjectRefGenerator] = [
-            cast(ray.ObjectRef[dict[str, Any]], ref) for ref in refs]
-        ready, remaining = ray.wait(actor_refs, num_returns=count, timeout=timeout)
+            cast(ray.ObjectRef[dict[str, Any]], ref) for ref in refs
+        ]
+        ready, remaining = ray.wait(
+            actor_refs, num_returns=count, timeout=timeout, fetch_local=False
+        )
         # Only ObjectRefs were submitted; Ray's annotation also allows generators.
-        return ([cast(OperationRef, ref) for ref in ready],
-                [cast(OperationRef, ref) for ref in remaining])
+        return (
+            [cast(OperationRef, ref) for ref in ready],
+            [cast(OperationRef, ref) for ref in remaining],
+        )
 
     def step(self):
         self._check_open()

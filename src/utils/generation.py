@@ -39,7 +39,9 @@ def generate_greedy_cached(
             pending_ids = next_token.reshape(1, 1)
 
     return torch.tensor(
-        [request.token_ids], dtype=input_ids.dtype, device=input_ids.device,
+        [request.token_ids],
+        dtype=input_ids.dtype,
+        device=input_ids.device,
     )
 
 

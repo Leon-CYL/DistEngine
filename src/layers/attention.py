@@ -19,7 +19,7 @@ class Attention(nn.Module):
             raise ValueError("num_heads must be divisible by num_kv_heads")
 
         self.num_kv_groups = num_heads // num_kv_heads
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
     def forward(
         self,
@@ -55,7 +55,7 @@ class Attention(nn.Module):
             device=q.device,
         )
 
-        future_mask = (key_positions.unsqueeze(0) > query_positions.unsqueeze(1))
+        future_mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)
 
         scores = scores.masked_fill(future_mask, float("-inf"))
 
@@ -70,8 +70,8 @@ class Attention(nn.Module):
 
         return probabilities @ v
         # output: [B, num_heads, T, head_dim]
- 
-       
+
+
 class LlamaAttention(nn.Module):
     def __init__(
         self,
@@ -117,17 +117,23 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         batch_size, sequence_length, _ = x.shape
 
-        q = self.q_proj(x).view(
-            batch_size, sequence_length, self.num_heads, self.head_dim
-        ).transpose(1, 2)
+        q = (
+            self.q_proj(x)
+            .view(batch_size, sequence_length, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
 
-        k = self.k_proj(x).view(
-            batch_size, sequence_length, self.num_kv_heads, self.head_dim
-        ).transpose(1, 2)
+        k = (
+            self.k_proj(x)
+            .view(batch_size, sequence_length, self.num_kv_heads, self.head_dim)
+            .transpose(1, 2)
+        )
 
-        v = self.v_proj(x).view(
-            batch_size, sequence_length, self.num_kv_heads, self.head_dim
-        ).transpose(1, 2)
+        v = (
+            self.v_proj(x)
+            .view(batch_size, sequence_length, self.num_kv_heads, self.head_dim)
+            .transpose(1, 2)
+        )
 
         q, k = self.rotary_emb(q, k, positions)
 
@@ -136,10 +142,14 @@ class LlamaAttention(nn.Module):
 
         context = self.attn(q, k, v, key_lengths=getattr(cache, "key_lengths", None))
 
-        context = context.transpose(1, 2).contiguous().view(
-            batch_size,
-            sequence_length,
-            self.num_heads * self.head_dim,
+        context = (
+            context.transpose(1, 2)
+            .contiguous()
+            .view(
+                batch_size,
+                sequence_length,
+                self.num_heads * self.head_dim,
+            )
         )
 
         return self.o_proj(context)

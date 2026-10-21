@@ -5,11 +5,11 @@ class PrefillHoldingPool:
 
         self._max_held_requests = max_held_requests
         self._ready: dict[str, None] = {}
-    
-    def is_full(self) -> bool: 
+
+    def is_full(self) -> bool:
         return len(self._ready) >= self._max_held_requests
-        
-    def add(self, request_id: str) -> None: 
+
+    def add(self, request_id: str) -> None:
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("request_id must be a nonempty string")
 
@@ -20,16 +20,15 @@ class PrefillHoldingPool:
             raise RuntimeError("Prefill holding pool is full")
 
         self._ready[request_id] = None
-        
-    def peek(self) -> str | None: 
+
+    def peek(self) -> str | None:
         return next(iter(self._ready), None)
-        
-    def remove(self, request_id: str) -> None: 
+
+    def remove(self, request_id: str) -> None:
         del self._ready[request_id]
-        
-    def __len__(self) -> int: 
+
+    def __len__(self) -> int:
         return len(self._ready)
-    
+
     def request_ids(self) -> list[str]:
         return list(self._ready)
-        

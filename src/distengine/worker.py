@@ -26,12 +26,15 @@ class _WorkerBase:
         num_blocks: int,
         block_size: int,
     ):
+        self.kv_transport = "nccl" if next(model.parameters()).device.type == "cuda" else "cpu"
+        self.kv_export_bytes = self.kv_import_bytes = 0
         manager = BlockManager(num_blocks, block_size)
         parameter = next(model.parameters())
         if not parameter.dtype.is_floating_point:
             raise ValueError("Model parameters must use a floating-point dtype")
-        if any(p.device != parameter.device or p.dtype != parameter.dtype
-               for p in model.parameters()):
+        if any(
+            p.device != parameter.device or p.dtype != parameter.dtype for p in model.parameters()
+        ):
             raise ValueError("Model parameters must share one device and dtype")
 
         config = model.config
@@ -76,6 +79,9 @@ class _WorkerBase:
             "role": type(self).__name__,
             "device": str(self.runner.device),
             "dtype": str(self.runner.dtype),
+            "kv_transport": self.kv_transport,
+            "kv_export_bytes": self.kv_export_bytes,
+            "kv_import_bytes": self.kv_import_bytes,
             "active_request_ids": list(self.requests),
             "num_free_blocks": self.runner.block_manager.num_free_blocks,
             "num_blocks": self.runner.block_manager.num_blocks,
@@ -93,6 +99,7 @@ class _WorkerBase:
         self._sync_measurement()
         self.activity = WorkerActivity()
         self.decode_batch_sizes = {}
+        self.kv_export_bytes = self.kv_import_bytes = 0
 
     def telemetry(self, stop=False):
         if stop and self.activity is not None and self.activity.stopped is None:
@@ -128,7 +135,7 @@ class _WorkerBase:
             self.release(request_id)
 
         self.closed = True
-        
+
     def _start_local(
         self,
         request_id: str,
@@ -157,10 +164,7 @@ class _WorkerBase:
         # Reserve enough total pool capacity for this request to finish
         # when run alone. The final generated token remains uncached.
         maximum_cached_tokens = request.num_prompt_tokens + max_new_tokens - 1
-        pool_capacity = (
-            self.runner.block_manager.num_blocks
-            * self.runner.block_manager.block_size
-        )
+        pool_capacity = self.runner.block_manager.num_blocks * self.runner.block_manager.block_size
 
         if maximum_cached_tokens > pool_capacity:
             raise ValueError("Request exceeds the worker's KV capacity")
@@ -180,20 +184,30 @@ class _WorkerBase:
             self.release(request_id)
 
         return result
-    
+
 
 class PrefillWorker(_WorkerBase):
-    def __init__(self, model: LlamaForCausalLM, num_blocks: int, block_size: int, holding_pool: PrefillHoldingPool):
+    def __init__(
+        self,
+        model: LlamaForCausalLM,
+        num_blocks: int,
+        block_size: int,
+        holding_pool: PrefillHoldingPool,
+    ):
         super().__init__(model, num_blocks, block_size)
         self.prefill_pool = holding_pool
-    
+
     @measured("export_request")
     def export_request(self, request_id: str) -> dict:
         """Keep source ownership until the destination acknowledges import."""
         from .kv_transfer import export_prefill
 
         self._ensure_open()
-        return export_prefill(self.runner, self.requests[request_id])
+        payload = export_prefill(self.runner, self.requests[request_id])
+        self.kv_export_bytes += sum(
+            payload[k].numel() * payload[k].element_size() for k in ("keys", "values")
+        )
+        return payload
 
     @measured("prefill")
     def prefill(
@@ -219,7 +233,7 @@ class PrefillWorker(_WorkerBase):
             self.prefill_pool.add(request_id)
 
         return result
-    
+
     @measured("release")
     def release(self, request_id: str) -> dict:
         result = super().release(request_id)
@@ -228,22 +242,22 @@ class PrefillWorker(_WorkerBase):
             self.prefill_pool.remove(request_id)
 
         return result
-    
+
     def peek_ready(self) -> dict | None:
         self._ensure_open()
-        
+
         request_id = self.prefill_pool.peek()
         if request_id is None:
             return None
-        
+
         request = self.requests[request_id]
-        
+
         return {
             "request_id": request.request_id,
             "num_prompt_tokens": request.num_prompt_tokens,
             "max_new_tokens": request.max_new_tokens,
         }
-        
+
     def can_prefill(
         self,
         num_prompt_tokens: int,
@@ -267,7 +281,8 @@ class PrefillWorker(_WorkerBase):
             return False
 
         return manager.can_allocate(num_prompt_tokens)
-            
+
+
 class DecodeWorker(_WorkerBase):
     @measured("import_request")
     def import_request(
@@ -294,6 +309,9 @@ class DecodeWorker(_WorkerBase):
         )
 
         self.requests[request.request_id] = request
+        self.kv_import_bytes += sum(
+            payload[k].numel() * payload[k].element_size() for k in ("keys", "values")
+        )
         return self._snapshot(request)
 
     @measured("step_batch")
@@ -341,7 +359,7 @@ class DecodeWorker(_WorkerBase):
             self.release(request_id)
 
         return result
-    
+
     def prepare_local_fixture(
         self,
         request_id: str,
@@ -355,7 +373,7 @@ class DecodeWorker(_WorkerBase):
             max_new_tokens,
             eos_token_id,
         )
-        
+
     def can_admit(
         self,
         num_prompt_tokens: int,
@@ -393,7 +411,7 @@ def build_cpu_model(seed: int) -> LlamaForCausalLM:
         max_position_embeddings=32,
     )
 
-    return LlamaForCausalLM(config).eval()
+    return LlamaForCausalLM(config).float().eval()
 
 
 def build_worker_model(seed: int, device: str, checkpoint: bool):
@@ -413,23 +431,27 @@ def build_worker_model(seed: int, device: str, checkpoint: bool):
         from utils.load_model import load_model
 
         return load_model(target)
-    return build_cpu_model(seed).to(device=target)
+    return build_cpu_model(seed).to(device=target, dtype=torch.float32)
 
 
 def actor_info(worker) -> dict:
     info = worker.info()
-    info.update({
-        "actor_id": ray.get_runtime_context().get_actor_id(),
-        "node_id": ray.get_runtime_context().get_node_id(),
-        "ray_gpu_ids": ray.get_runtime_context().get_accelerator_ids().get("GPU", []),
-        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "kv_device": str(worker.runner.storage.k_cache.device),
-    })
+    info.update(
+        {
+            "actor_id": ray.get_runtime_context().get_actor_id(),
+            "node_id": ray.get_runtime_context().get_node_id(),
+            "ray_gpu_ids": ray.get_runtime_context().get_accelerator_ids().get("GPU", []),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "kv_device": str(worker.runner.storage.k_cache.device),
+        }
+    )
     device = worker.runner.device
     if any(p.device != device for p in worker.runner.model.parameters()):
         raise RuntimeError("Model parameters have inconsistent placement")
-    if (worker.runner.storage.k_cache.device != device
-            or worker.runner.storage.v_cache.device != device):
+    if (
+        worker.runner.storage.k_cache.device != device
+        or worker.runner.storage.v_cache.device != device
+    ):
         raise RuntimeError("KV storage must be on the model device")
     if device.type == "cuda":
         info["visible_gpu_count"] = torch.cuda.device_count()
@@ -444,8 +466,11 @@ def scheduled_state(worker):
     if isinstance(worker, PrefillWorker):
         state["max_held_requests"] = worker.prefill_pool._max_held_requests
         state["held_descriptors"] = [
-            {"request_id": rid, "num_prompt_tokens": worker.requests[rid].num_prompt_tokens,
-             "max_new_tokens": worker.requests[rid].max_new_tokens}
+            {
+                "request_id": rid,
+                "num_prompt_tokens": worker.requests[rid].num_prompt_tokens,
+                "max_new_tokens": worker.requests[rid].max_new_tokens,
+            }
             for rid in worker.prefill_pool.request_ids()
         ]
     return state
@@ -469,6 +494,25 @@ def import_scheduled(worker, exported):
 
 
 class ScheduledActorMethods:
+    @ray.method
+    def transfer_probe(self):
+        device = self.worker.runner.device
+        return torch.arange(32, device=device, dtype=self.worker.runner.dtype)
+
+    @ray.method
+    def validate_transfer_probe(self, tensor):
+        device = self.worker.runner.device
+        if tensor.device != device or tensor.dtype != self.worker.runner.dtype:
+            raise RuntimeError("Tensor transport changed the expected KV device/dtype")
+        expected = torch.arange(32, device=device, dtype=tensor.dtype)
+        if not torch.equal(tensor, expected):
+            raise RuntimeError("Tensor transport probe corrupted data")
+        return {
+            "received_device": str(tensor.device),
+            "dtype": str(tensor.dtype),
+            "bytes": tensor.numel() * tensor.element_size(),
+        }
+
     @ray.method
     def scheduled_state(self):
         return scheduled_state(self.worker)
@@ -494,7 +538,12 @@ class PrefillActorImpl(ScheduledActorMethods):
         max_held_requests: int = 4,
     ):
         model = build_worker_model(seed, device, checkpoint)
-        self.worker = PrefillWorker(model, num_blocks, block_size, holding_pool=PrefillHoldingPool(max_held_requests))
+        self.worker = PrefillWorker(
+            model,
+            num_blocks,
+            block_size,
+            holding_pool=PrefillHoldingPool(max_held_requests),
+        )
 
     @ray.method
     def start_measurement(self):
@@ -522,7 +571,7 @@ class PrefillActorImpl(ScheduledActorMethods):
             max_new_tokens,
             eos_token_id,
         )
-        
+
     @ray.method
     def can_prefill(
         self,
@@ -534,7 +583,7 @@ class PrefillActorImpl(ScheduledActorMethods):
     @ray.method
     def export_request(self, request_id: str) -> dict:
         return self.worker.export_request(request_id)
-    
+
     @ray.method
     def peek_ready(self) -> dict | None:
         return self.worker.peek_ready()
@@ -586,7 +635,7 @@ class DecodeActorImpl(ScheduledActorMethods):
             max_new_tokens,
             eos_token_id,
         )
-    
+
     @ray.method
     def import_request(
         self,
@@ -598,7 +647,7 @@ class DecodeActorImpl(ScheduledActorMethods):
             payload,
             reserve_full=reserve_full,
         )
-        
+
     @ray.method
     def can_admit(
         self,
@@ -629,9 +678,17 @@ class DecodeActorImpl(ScheduledActorMethods):
 
 # Preserve the implementation types so editors understand actor methods.
 PrefillActor: ActorClass[PrefillActorImpl] = ray.remote(
-    num_cpus=1, num_gpus=0, max_restarts=0, max_task_retries=0,
+    num_cpus=1,
+    num_gpus=0,
+    max_restarts=0,
+    max_task_retries=0,
+    enable_tensor_transport=True,
 )(PrefillActorImpl)
 
 DecodeActor: ActorClass[DecodeActorImpl] = ray.remote(
-    num_cpus=1, num_gpus=0, max_restarts=0, max_task_retries=0,
+    num_cpus=1,
+    num_gpus=0,
+    max_restarts=0,
+    max_task_retries=0,
+    enable_tensor_transport=True,
 )(DecodeActorImpl)

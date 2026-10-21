@@ -5,7 +5,8 @@ class RequestStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     FINISHED = auto()
-    
+
+
 class Request:
     def __init__(
         self,
@@ -16,10 +17,10 @@ class Request:
     ) -> None:
         if max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
-        
+
         if len(prompt_token_ids) == 0:
             raise ValueError("prompt_token_ids is empty, can't generate tokens")
-        
+
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids.copy()
         self.max_new_tokens = max_new_tokens
@@ -53,7 +54,7 @@ class Request:
         if self.status != RequestStatus.RUNNING:
             raise RuntimeError("This request is not in RUNNING state")
         self.generated_token_ids.append(token_id)
-        
+
         if token_id == self.eos_token_id:
             self.reason = "eos"
             self.status = RequestStatus.FINISHED

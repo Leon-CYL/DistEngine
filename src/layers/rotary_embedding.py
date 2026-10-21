@@ -26,7 +26,7 @@ class RotaryEmbedding(nn.Module):
         # k:         [B, kv_heads,    T, head_dim]
         # positions: [B, T]
 
-        angles = (positions.float().unsqueeze(-1) * self.inv_freq.float())
+        angles = positions.float().unsqueeze(-1) * self.inv_freq.float()
 
         cos = angles.cos().unsqueeze(1)
         sin = angles.sin().unsqueeze(1)

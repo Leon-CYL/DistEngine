@@ -8,9 +8,7 @@ from utils.load_model import MODEL_ID, REVISION, load_model
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate text with the custom TinyLlama model."
-    )
+    parser = argparse.ArgumentParser(description="Generate text with the custom TinyLlama model.")
     parser.add_argument(
         "--prompt",
         default="What is the capital of France?",

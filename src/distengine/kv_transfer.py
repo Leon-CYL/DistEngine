@@ -1,4 +1,4 @@
-"""Versioned CPU KV snapshots; physical block IDs never cross workers."""
+"""Versioned device-resident KV snapshots; CUDA transfers use Ray RDT/NCCL."""
 
 import hashlib
 import json
@@ -23,7 +23,9 @@ def model_identity(model) -> str:
         else:
             for name, tensor in model.state_dict().items():
                 digest.update(name.encode())
-                digest.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+                digest.update(
+                    tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                )
 
         model._transfer_identity = digest.hexdigest()
 
@@ -32,6 +34,7 @@ def model_identity(model) -> str:
 
 @torch.inference_mode()
 def export_prefill(runner, request: Request) -> dict:
+    transport = "nccl" if runner.device.type == "cuda" else "cpu"
     if request.is_finished or request.num_generated_tokens != 1:
         raise ValueError("Only unfinished, freshly prefetched requests can transfer")
 
@@ -42,13 +45,15 @@ def export_prefill(runner, request: Request) -> dict:
 
     layers = [cache.read(layer) for layer in range(cache.num_layers)]
 
-    # clone() also isolates CPU-worker exports; .cpu() alone may alias CPU data.
+    # Stack creates owned snapshots, independent of mutable paged storage.
+    # Ray RDT retains these CUDA buffers until the consumer finishes importing.
     with torch.inference_mode(False):
-        keys = torch.stack([k for k, _ in layers]).detach().cpu().clone().contiguous()
-        values = torch.stack([v for _, v in layers]).detach().cpu().clone().contiguous()
+        keys = torch.stack([k for k, _ in layers]).detach().contiguous()
+        values = torch.stack([v for _, v in layers]).detach().contiguous()
 
     return {
-        "version": 1,
+        "version": 2,
+        "transport": transport,
         "model_identity": model_identity(runner.model),
         "request_id": request.request_id,
         "prompt_token_ids": request.prompt_token_ids.copy(),
@@ -68,10 +73,10 @@ def import_prefill(
     *,
     reserve_full: bool = False,
 ) -> Request:
-    
     """Validate before allocation; publish cache only after every layer copies."""
     required = {
         "version",
+        "transport",
         "model_identity",
         "request_id",
         "prompt_token_ids",
@@ -86,9 +91,13 @@ def import_prefill(
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("Malformed KV transfer payload")
 
-    if type(payload["version"]) is not int or payload["version"] != 1:
+    if type(payload["version"]) is not int or payload["version"] != 2:
         raise ValueError("Unsupported KV transfer version")
 
+    transport = "nccl" if runner.device.type == "cuda" else "cpu"
+    if payload["transport"] != transport:
+        raise ValueError("KV transfer transport mismatch")
+    tensor_device = "cuda" if transport == "nccl" else "cpu"
     if payload["model_identity"] != model_identity(runner.model):
         raise ValueError("KV transfer model/configuration mismatch")
 
@@ -111,7 +120,7 @@ def import_prefill(
         )
     ):
         raise ValueError("Invalid request ID or token metadata")
-    
+
     if type(reserve_full) is not bool:
         raise ValueError("reserve_full must be a boolean")
 
@@ -148,11 +157,14 @@ def import_prefill(
         if (
             not isinstance(tensor, torch.Tensor)
             or tuple(tensor.shape) != shape
-            or tensor.device.type != "cpu"
+            or tensor.device.type != tensor_device
+            or (transport == "nccl" and tensor.device != runner.device)
             or tensor.dtype != runner.dtype
             or not torch.isfinite(tensor).all().item()
         ):
-            raise ValueError("KV must be finite CPU tensors with matching shape and dtype")
+            raise ValueError(
+                f"KV must be finite {tensor_device} tensors with matching shape, dtype and device"
+            )
 
     maximum = request.num_prompt_tokens + request.max_new_tokens - 1
 
@@ -180,15 +192,10 @@ def import_prefill(
             storage=runner.storage,
         )
 
-        for layer in range(config.num_hidden_layers):
-            cache.append(
-                layer,
-                payload["keys"][layer].to(runner.device),
-                payload["values"][layer].to(runner.device),
-            )
+        cache.load_prefix(payload["keys"], payload["values"])
 
         if runner.device.type == "cuda":
-            # ACK only after all host-to-device copies are complete.
+            # ACK only after all device writes are complete.
             torch.cuda.synchronize(runner.device)
 
         runner.caches[request.request_id] = cache

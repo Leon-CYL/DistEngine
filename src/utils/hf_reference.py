@@ -43,7 +43,7 @@ def main() -> None:
         help="Model branch, tag, or commit hash; use a saved commit to reproduce a run.",
     )
     args = parser.parse_args()
-    
+
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be positive")
 
@@ -138,7 +138,6 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(reference, indent=2) + "\n", encoding="utf-8")
     print(f"Saved reference to {args.output}")
-    
 
 
 if __name__ == "__main__":

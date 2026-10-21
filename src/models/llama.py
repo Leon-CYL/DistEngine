@@ -27,8 +27,8 @@ class LlamaMLP(nn.Module):
         activated = self.act_fn(packed)
 
         return self.down_proj(activated)
-    
-    
+
+
 class LlamaDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -70,7 +70,7 @@ class LlamaDecoderLayer(nn.Module):
         cache: PagedKVCache | BatchedPagedKVCache | None = None,
         layer_index: int = 0,
     ) -> torch.Tensor:
-        
+
         residual = x
         x = self.input_layernorm(x)
         x = self.self_attn(
@@ -87,7 +87,7 @@ class LlamaDecoderLayer(nn.Module):
         x = residual + x
 
         return x
-    
+
 
 class LlamaModel(nn.Module):
     def __init__(self, config: LlamaConfig):
@@ -109,17 +109,19 @@ class LlamaModel(nn.Module):
             raise ValueError("Only default RoPE is supported")
         rope_theta = float(rope_parameters["rope_theta"])
 
-        self.layers = nn.ModuleList([
-            LlamaDecoderLayer(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=num_kv_heads,
-                rms_norm_eps=config.rms_norm_eps,
-                rope_theta=rope_theta,
-            )
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                LlamaDecoderLayer(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    num_heads=config.num_attention_heads,
+                    num_kv_heads=num_kv_heads,
+                    rms_norm_eps=config.rms_norm_eps,
+                    rope_theta=rope_theta,
+                )
+                for _ in range(config.num_hidden_layers)
+            ]
+        )
 
         self.norm = RMSNorm(
             hidden_size=config.hidden_size,
@@ -132,7 +134,7 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor | None = None,
         cache: PagedKVCache | BatchedPagedKVCache | None = None,
     ) -> torch.Tensor:
-        
+
         batch_size, sequence_length = input_ids.shape
 
         past_length = 0
@@ -150,15 +152,23 @@ class LlamaModel(nn.Module):
             if past_length + sequence_length > cache.capacity:
                 raise ValueError("KV cache capacity exceeded")
 
-        expected_positions = torch.arange(
-            past_length,
-            past_length + sequence_length,
-            device=input_ids.device,
-            dtype=torch.long,
-        ).unsqueeze(0).expand(batch_size, -1)
+        expected_positions = (
+            torch.arange(
+                past_length,
+                past_length + sequence_length,
+                device=input_ids.device,
+                dtype=torch.long,
+            )
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
 
         if batched_cache:
-            if sequence_length != 1 or batch_size != len(cache.caches) or cache.num_layers != len(self.layers):
+            if (
+                sequence_length != 1
+                or batch_size != len(cache.caches)
+                or cache.num_layers != len(self.layers)
+            ):
                 raise ValueError("Invalid decode batch shape or layer count")
             expected_positions = torch.tensor(cache.lengths, device=input_ids.device).unsqueeze(1)
 
@@ -179,7 +189,7 @@ class LlamaModel(nn.Module):
             )
 
         return self.norm(x)
-    
+
 
 class LlamaForCausalLM(nn.Module):
     def __init__(self, config: LlamaConfig):

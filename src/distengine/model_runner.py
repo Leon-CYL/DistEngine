@@ -6,6 +6,7 @@ from models.llama import LlamaForCausalLM
 from .block_manager import BlockManager
 from .request import Request, RequestStatus
 
+
 class ModelRunner:
     def __init__(
         self,
@@ -39,8 +40,7 @@ class ModelRunner:
         for name, tensor in (("K", storage.k_cache), ("V", storage.v_cache)):
             if tuple(tensor.shape) != expected_shape:
                 raise ValueError(
-                    f"{name} storage shape must be {expected_shape}, "
-                    f"got {tuple(tensor.shape)}"
+                    f"{name} storage shape must be {expected_shape}, got {tuple(tensor.shape)}"
                 )
             if tensor.device != device:
                 raise ValueError(f"{name} storage device must be {device}, got {tensor.device}")
@@ -55,7 +55,6 @@ class ModelRunner:
         self.storage = storage
         self.sampler = GreedySampler()
         self.caches: dict[str, PagedKVCache] = {}
-
 
     def _validate_request(self, request: Request) -> None:
         if not isinstance(request, Request):
@@ -76,7 +75,6 @@ class ModelRunner:
 
             if not 0 <= token_id < self.model.config.vocab_size:
                 raise ValueError("Token ID is outside the model vocabulary")
-
 
     def prepare_inputs(
         self,
@@ -110,7 +108,6 @@ class ModelRunner:
         ).unsqueeze(0)
 
         return input_ids, positions
-
 
     @torch.inference_mode()
     def prefill(self, request: Request) -> int:
@@ -175,7 +172,6 @@ class ModelRunner:
             self.block_manager.free(request.request_id)
             raise
 
-
     @torch.inference_mode()
     def decode(self, request: Request) -> int:
         self._validate_request(request)
@@ -226,7 +222,6 @@ class ModelRunner:
             self.block_manager.free(request.request_id)
             raise
 
-
     @torch.inference_mode()
     def decode_batch(self, requests: list[Request]) -> list[int]:
         requests = list(requests)
@@ -246,14 +241,19 @@ class ModelRunner:
                 raise ValueError("Decode requires an active generated token")
             if cache.sequence_length != len(request.token_ids) - 1:
                 raise ValueError("Request tokens and cache length are inconsistent")
-            additional += max(0, manager._required_blocks(cache.sequence_length + 1)
-                              - len(manager.get_block_table(request.request_id)))
+            additional += max(
+                0,
+                manager._required_blocks(cache.sequence_length + 1)
+                - len(manager.get_block_table(request.request_id)),
+            )
             caches.append(cache)
         # Preflight the whole batch before changing block ownership or KV contents.
         if additional > manager.num_free_blocks:
             raise RuntimeError("Not enough free blocks for decode batch")
         for request, cache in zip(requests, caches):
-            cache.update_block_table(manager.ensure_capacity(request.request_id, cache.sequence_length + 1))
+            cache.update_block_table(
+                manager.ensure_capacity(request.request_id, cache.sequence_length + 1)
+            )
         batch = BatchedPagedKVCache(caches)
         inputs = torch.tensor([[r.generated_token_ids[-1]] for r in requests], device=self.device)
         try:
@@ -283,5 +283,3 @@ class ModelRunner:
         # Retire the runner's cache view before releasing physical blocks.
         del self.caches[request_id]
         self.block_manager.free(request_id)
-        
-        

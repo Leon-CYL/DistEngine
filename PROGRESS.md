@@ -48,7 +48,7 @@ Status: complete.
 
 The custom Llama model remains in `src/models/llama.py`, with components
 in `src/layers/`. `src/utils/load_model.py` loads pinned Hugging Face weights
-strictly into the custom model in float32. Attention uses PyTorch matrix
+strictly into the custom model, using float32 on CPU and CUDA. Attention uses PyTorch matrix
 operations and float32 softmax; fused FlashAttention/FlashInfer kernels,
 tensor parallelism and CUDA graphs are not implemented.
 
@@ -59,7 +59,7 @@ Status: complete.
 `src/utils/generation.py` provides uncached `generate_greedy()` and
 `generate_greedy_cached()` using the custom model and greedy sampler.
 `src/utils/manual_generate.py` is the text-generation CLI. The benchmark checks
-completed outputs against a float32 cached single-sequence reference.
+completed outputs against a cached single-sequence reference in float32.
 
 ## Stage 6 — Paged KV cache
 
@@ -129,11 +129,15 @@ family and memory. Modal allocates four A100-80GB GPUs, two per role.
 
 Status: complete.
 
-`src/distengine/kv_transfer.py` exports versioned, cloned CPU snapshots
-with model identity, request metadata and KV tensors. Import validates payload,
-shape, dtype and capacity before publishing destination state. Ray passes the
-export reference to the destination actor. Source KV remains owned until import
-is acknowledged, then release is scheduled. No RDMA/direct GPU transfer exists.
+`src/distengine/kv_transfer.py` exports version-2 owned KV snapshots with model
+identity, request metadata and an explicit transport. CUDA workers use Ray
+Direct Transport/NCCL exclusively. CPU-only smoke checks exchange CPU tensors. Decode validates tensor shape, dtype, finiteness and device,
+loads all layers by physical block, and acknowledges after device writes finish.
+The source retains KV until acknowledgment. The driver passes references only;
+`ray.wait(fetch_local=False)` prevents export materialization on the driver.
+Actual NCCL GPU validation remains pending; local CPU/Gloo direct transport is
+checked. NCCL link selection depends on the hardware; RDMA is not established.
+
 
 ## Stage 14 — Prefill KV holding pool
 
@@ -237,15 +241,15 @@ Status: complete.
 The final benchmark uses the same frozen workload and configuration for
 baseline and stealing. Completed outputs must match the float32 cached greedy
 reference; successful runs drain all requests and release KV. Use the paired
-command below to compare both policies on the same loaded actors. New GPU
-correctness and performance verification is pending execution of that command.
+command below to compare both policies on the same loaded actors. NCCL GPU
+correctness and performance must be checked in a fresh run.
 
 ## Stage 25 — cleanup and final documentation
 
 Status: complete.
 
 Code is organized into `src/distengine/`, `src/models/`, `src/layers/`,
-`src/utils/` and one Modal benchmark launcher. README includes the architecture
+`src/utils/` and the online Modal benchmark launcher. README includes the architecture
 diagram, setup, benchmark commands, results, limitations, future work and
 references. Runtime validation, benchmark output checks and KV cleanup checks
 remain in the active implementation.
@@ -264,7 +268,7 @@ modal run src/Modal/run_benchmark.py \
   --workload-dir workloads/baseline \
   --compare-stealing --decode-batch-size 4 \
   --repeats 3 --max-run-seconds 0 \
-  --output results/final-paired
+  --output results/float32-paired
 ```
 
 For independent baseline and stealing runs:
@@ -274,13 +278,13 @@ modal run src/Modal/run_benchmark.py \
   --workload-dir workloads/baseline \
   --no-stealing --decode-batch-size 4 \
   --repeats 3 --max-run-seconds 0 \
-  --output results/final-baseline
+  --output results/float32-baseline
 
 modal run src/Modal/run_benchmark.py \
   --workload-dir workloads/baseline \
-  --stealing --decode-batch-size 4 \
+  --decode-batch-size 64 \
   --repeats 3 --max-run-seconds 0 \
-  --output results/final-work-stealing
+  --output results/float32-work-stealing
 ```
 
 Choose unused output directories. Reports are saved locally as `baseline.json`
@@ -302,7 +306,154 @@ Local CPU baseline/stealing smoke checks and frozen-input checksum checks pass.
 CPU checks use a deterministic small Llama and do not establish TinyLlama GPU
 numerics or throughput. No new GPU run was launched for this documentation edit.
 TTFT/TPOT/E2E are driver-observed; worker busy time is distinct from sampled GPU
-utilization. Current reference generation uses the custom float32 cached model.
-KV handoff passes through CPU memory; attention gathers/pads KV for dense
-computation. RDMA, FlashInfer and tensor parallelism are future work. Performance
+utilization. Current reference generation uses the custom model in float32.
+KV handoff uses NCCL CUDA tensors exclusively on GPU;
+attention gathers/pads KV for dense
+computation. Cross-node RDMA, FlashInfer and tensor parallelism are future work. Performance
 at the selected 5-RPS load does not establish maximum serving capacity.
+
+
+## NCCL KV handoff
+
+- The online GPU benchmark defaults to ``; CPU benchmark
+  runs use `cpu`. Actors enable Ray's tensor-transport support. The benchmark
+  creates and destroys the actor collective group around all repeated passes.
+- Prefill returns owned CUDA tensors through RDT; decode receives those tensors
+  on its assigned GPU. Metadata/control stays on Ray. A CPU payload is rejected
+  in NCCL mode. The source remains held until successful import acknowledgment.
+- Snapshot loading copies physical blocks across all layers rather than issuing
+  one CUDA copy per token per layer. Allocation/publish rollback remains intact.
+- Every source/target pair passes a dtype/device/content probe before warm-up.
+  Reports retain GPU topology, probe outcomes, per-worker sent/received KV bytes,
+  and end-to-end `kv_handoffs` events. Full-drain byte totals must agree.
+- The Modal image adds `cupy-cuda13x[ctk]==14.2.0` to its GPU environment. CuPy is
+  not added to the local CPU dependency set. Ray RDT is experimental.
+- Local checks cover noncontiguous block tables, float32 exact CPU outputs,
+  snapshot isolation, malformed transport rejection, source ownership and failed
+  import rollback. Real CPU Ray/Gloo checks cover all four source/target pairs,
+  nested tensor envelopes, acknowledgment, actor reuse and cleanup. A100/NCCL
+  performance and numerical validation have not been run for this change.
+
+```bash
+modal run src/Modal/run_benchmark.py \
+  --workload-dir workloads/baseline \
+  --stealing \
+  --decode-batch-size 64 --repeats 1 --max-run-seconds 0 \
+  --output results/nccl-work-stealing
+```
+
+GPU-to-CPU staging has been removed. Historical saved reports remain unchanged. Link-level
+routing (NVLink/PCIe/network) is hardware-dependent; no RDMA claim is made.
+
+The precision selector and BF16 configuration were removed. Model loading,
+workers and reference generation use float32. GPU topology collection is best
+effort; a diagnostic failure is recorded and mandatory NCCL probes still run.
+
+## Saturation measurement
+
+`src/Modal/run_capacity.py` reuses the online harness and GPU actors for a decode
+batch sweep with simultaneous arrivals and fixed output lengths (EOS disabled).
+It retains float32 cached-reference validation, NCCL preflight, telemetry and KV
+cleanup. KV blocks are configurable independently of the online baseline.
+Reports retain the derived workload and per-batch summaries. A partial pass stops
+the sweep; observed token throughput is distinct from full-drain throughput.
+Local CPU sweep checks passed; GPU capacity numbers require a new Modal run.
+
+## Decode profiling
+
+Added opt-in `src/utils/profiller.py` and `src/Modal/run_profiler.py`. One A100
+profiles the real decode-worker batch path in isolation. Separate CUDA-event and
+PyTorch trace passes exclude prefill/setup and compare generated tokens. Trace
+ranges distinguish KV gather/padding, reads, attention, forward and sampling.
+Reports and compressed traces return to local storage. CPU trace/range, output
+consistency and cleanup checks passed; CUDA profiling requires the Modal run.
+This does not measure NCCL/Ray scheduling overhead or change serving execution.
+
+## Vectorized decode KV updates
+
+`BatchedPagedKVCache` now precomputes write/read block indices per decode step
+and reuses them across layers. Shared-storage batches perform one indexed write
+per K/V tensor and gather directly into batched attention inputs, zeroing padded
+positions. The per-request append/read/concatenate/pad loop is bypassed in the
+engine path. Independent storage views are no longer accepted by batched decode. Shared
+batches reject overlapping block ownership and repeated layer appends.
+Local checks cover exact cache equivalence, fragmented block tables, mixed and
+empty prefixes, boundary crossings, NaN padding and float32/BF16 storage. The
+float32 engine baseline/stealing reference checks pass; GPU correctness and
+performance need the new profiler and capacity runs before claiming a speedup.
+
+## Final defaults and cleanup
+
+GPU workers now always use device-resident NCCL handoff. Removed the transport
+selector and GPU-to-CPU staging and CPU-to-GPU import copies. CPU-only smoke
+workers still exchange native CPU tensors. Batched decode requires shared KV
+storage and uses the vectorized path; the legacy independent-storage loop was
+removed. The capacity command defaults to the final batch-64, 256-request,
+64-output-token, three-pass configuration with stealing enabled. Online benchmarks
+and the coordinator default to batch 64 and stealing. The no-stealing switch
+remains only to reproduce the documented baseline. Saved reports are preserved.
+
+## Benchmark and profiling guide
+
+Moved from README.md to keep the project introduction concise.
+
+## Saturation benchmark
+
+The final configuration is now the default: 256 simultaneous requests, 64 output
+tokens each with EOS disabled, batch limit 64, three passes, 2,048 KV blocks per
+worker, float32, NCCL, vectorized KV updates and work stealing. Use a fresh output
+directory for each run:
+
+```bash
+modal run src/Modal/run_capacity.py --output results/optimized-final
+```
+
+Results are local in `results/optimized-final/baseline.json` and per-pass files.
+Inspect `capacity_summary` for throughput and completion, and `runs` for latency,
+GPU activity and exact-output checks. Each pass has a 90-second measured limit;
+a partial pass stops the run. Setup/reference/warm-up are excluded from measured
+throughput but included in the 600-second function timeout. GPU jobs incur charges.
+Workload size and batch-sweep options remain available for further experiments.
+
+## Batched KV updates
+
+Decode batches sharing a physical KV pool use indexed writes for all requests
+per layer, followed by direct batched gathering and zero padding. Block mappings
+are built once per decode step and reused across layers. This replaces the
+per-request copy/concatenate/pad path while keeping attention math, block
+ownership, capacity checks and transfer behavior unchanged. Batched decode requires a shared KV pool; the older independent-storage loop
+has been removed. CPU equivalence and GPU exact-output checks passed. The final capacity
+results in README.md use this vectorized path.
+
+## Decode profiling
+
+`src/utils/profiller.py` profiles the actual `DecodeWorker.step_batch()` path on
+one GPU, with no changes to normal benchmark execution. Prefill runs before
+measurement. A separate timing pass uses CUDA events; a second pass captures a
+PyTorch CPU/CUDA trace, tensor shapes and memory events. Temporary ranges label
+KV append/gather/padding, KV reads, attention, model forward and greedy sampling.
+The harness checks that traced and untraced generated tokens match and releases
+all KV blocks. This is a decode microprofile, excluding Ray, NCCL and coordinator
+overhead, rather than an end-to-end capacity benchmark.
+
+```bash
+modal run src/Modal/run_profiler.py \
+  --workload-dir workloads/baseline --batch-size 64 \
+  --warmup-steps 4 --timing-steps 16 --trace-steps 2 \
+  --num-blocks 2048 --output results/decode-profile-b64
+```
+
+This allocates one A100-80GB and incurs GPU charges. Results are saved locally:
+
+- `report.json`: stream elapsed CUDA-event timing per batch, wall time, memory,
+  kernel event count, output consistency and cleanup.
+- `operators.txt`: operators ranked by self CUDA time. Compare copy/concatenation,
+  padding, matrix operations and synchronization costs.
+- `decode.trace.json.gz`: compressed Chrome trace. Decompress it and open the
+  resulting JSON in Perfetto or Chrome tracing to inspect CPU launch gaps and
+  GPU kernels alongside the labeled ranges.
+
+Profiler overhead affects trace timings; use the separate timing pass for an
+untraced comparison. CUDA event durations include stream scheduling gaps, so they
+are not pure kernel execution time. Nested trace ranges overlap and must not be
+summed. A batch contains one next-token prediction per active request.

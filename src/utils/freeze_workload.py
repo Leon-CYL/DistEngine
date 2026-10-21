@@ -15,11 +15,23 @@ from distengine.workload import save_workload
 MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 REVISION = "fe8a4ea1ffedaf415f4da2f062534de366a451e6"
 BOUNDS = {"short": (32, 64), "medium": (128, 256), "long": (512, 768)}
-WEIGHTS = {"short": .6, "medium": .3, "long": .1}
+WEIGHTS = {"short": 0.6, "medium": 0.3, "long": 0.1}
 TOPICS = (
-    ("garden", "A community garden collects rainwater in tanks. Volunteers water the beds in the morning, record soil moisture, and share ripe vegetables with neighbors.", "Explain how the volunteers could conserve water."),
-    ("library", "A town library lends books and hosts evening classes. Staff track popular titles, repair damaged books, and help visitors find reliable information.", "Suggest ways the library could improve its service."),
-    ("cycling", "A cycling club plans trips along quiet roads. Riders check their brakes, carry drinking water, and choose rest stops with shelter from bad weather.", "Explain how the club could make its trips safer."),
+    (
+        "garden",
+        "A community garden collects rainwater in tanks. Volunteers water the beds in the morning, record soil moisture, and share ripe vegetables with neighbors.",
+        "Explain how the volunteers could conserve water.",
+    ),
+    (
+        "library",
+        "A town library lends books and hosts evening classes. Staff track popular titles, repair damaged books, and help visitors find reliable information.",
+        "Suggest ways the library could improve its service.",
+    ),
+    (
+        "cycling",
+        "A cycling club plans trips along quiet roads. Riders check their brakes, carry drinking water, and choose rest stops with shelter from bad weather.",
+        "Explain how the club could make its trips safer.",
+    ),
 )
 
 
@@ -38,7 +50,8 @@ def build_prompt_bank(tokenizer):
             for repeats in range(1, 100):
                 text = " ".join([paragraph] * repeats + [question])
                 formatted = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": text}], tokenize=False,
+                    [{"role": "user", "content": text}],
+                    tokenize=False,
                     add_generation_prompt=True,
                 )
                 ids = tuple(tokenizer(formatted, add_special_tokens=False)["input_ids"])
@@ -52,8 +65,16 @@ def build_prompt_bank(tokenizer):
     return tuple(bank)
 
 
-def freeze(output: Path, *, local_files_only=False, num_requests=100,
-           rate_rps=2.0, max_new_tokens=32, kv_capacity_tokens=1024, num_prefill_workers=2):
+def freeze(
+    output: Path,
+    *,
+    local_files_only=False,
+    num_requests=100,
+    rate_rps=2.0,
+    max_new_tokens=32,
+    kv_capacity_tokens=1024,
+    num_prefill_workers=2,
+):
     if type(num_prefill_workers) is not int or num_prefill_workers <= 0:
         raise ValueError("num_prefill_workers must be a positive integer")
     if type(num_requests) is not int or num_requests <= 0:
@@ -61,41 +82,76 @@ def freeze(output: Path, *, local_files_only=False, num_requests=100,
     if output.exists() and any(output.iterdir()):
         raise ValueError("Output directory must be empty; preserve frozen inputs")
     tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_ID, revision=REVISION, local_files_only=local_files_only,
+        MODEL_ID,
+        revision=REVISION,
+        local_files_only=local_files_only,
     )
     bank = build_prompt_bank(tokenizer)
     settings = dict(
-        arrival_mode="poisson", rate_rps=rate_rps, num_requests=num_requests,
-        arrival_seed=42, prompt_seed=19, class_weights=WEIGHTS,
-        max_new_tokens=max_new_tokens, eos_token_id=tokenizer.eos_token_id,
-        vocab_size=32000, max_context_tokens=2048, kv_capacity_tokens=kv_capacity_tokens,
+        arrival_mode="poisson",
+        rate_rps=rate_rps,
+        num_requests=num_requests,
+        arrival_seed=42,
+        prompt_seed=19,
+        class_weights=WEIGHTS,
+        max_new_tokens=max_new_tokens,
+        eos_token_id=tokenizer.eos_token_id,
+        vocab_size=32000,
+        max_context_tokens=2048,
+        kv_capacity_tokens=kv_capacity_tokens,
     )
     workload = generate_mixed_workload(prompt_bank=bank, **settings)
     output.mkdir(parents=True, exist_ok=True)
     bank_path = output / "prompt-bank.json"
     workload_path = output / "mixed-v1.json"
-    write_json(bank_path, {"schema_version": 1, "model_id": MODEL_ID,
-                          "revision": REVISION, "length_bounds": BOUNDS,
-                          "prompts": [asdict(p) for p in bank]})
+    write_json(
+        bank_path,
+        {
+            "schema_version": 1,
+            "model_id": MODEL_ID,
+            "revision": REVISION,
+            "length_bounds": BOUNDS,
+            "prompts": [asdict(p) for p in bank],
+        },
+    )
     save_workload(workload, workload_path)
     by_tokens = {p.token_ids: p for p in bank}
-    assignments = [{"request_id": r.request_id,
-                    "prompt_id": by_tokens[r.prompt_token_ids].prompt_id,
-                    "length_class": by_tokens[r.prompt_token_ids].length_class}
-                   for r in workload.requests]
-    source_totals = [sum(len(r.prompt_token_ids) for r in workload.requests[i::num_prefill_workers]) for i in range(num_prefill_workers)]
-    write_json(output / "manifest.json", {
-        "schema_version": 1, "model_id": MODEL_ID, "tokenizer_id": MODEL_ID,
-        "revision": REVISION, "chat_template": tokenizer.chat_template,
-        "settings": settings, "selection": "largest-remainder quotas; seeded shuffle; uniform prompt choice",
-        "prompt_bank": {"file": bank_path.name, "sha256": digest(bank_path)},
-        "workload": {"file": workload_path.name, "sha256": digest(workload_path)},
-        "class_counts": dict(Counter(a["length_class"] for a in assignments)),
-        "request_prompts": assignments,
-        "round_robin": {"num_prefill_workers": num_prefill_workers, "prompt_tokens_per_source": source_totals,
-                        "max_to_min_ratio": max(source_totals) / min(source_totals) if min(source_totals) else None},
-        "capacity_note": f"Each worker needs at least {kv_capacity_tokens} KV token slots (e.g. {(kv_capacity_tokens + 15) // 16} blocks of 16); this is not a throughput recommendation.",
-    })
+    assignments = [
+        {
+            "request_id": r.request_id,
+            "prompt_id": by_tokens[r.prompt_token_ids].prompt_id,
+            "length_class": by_tokens[r.prompt_token_ids].length_class,
+        }
+        for r in workload.requests
+    ]
+    source_totals = [
+        sum(len(r.prompt_token_ids) for r in workload.requests[i::num_prefill_workers])
+        for i in range(num_prefill_workers)
+    ]
+    write_json(
+        output / "manifest.json",
+        {
+            "schema_version": 1,
+            "model_id": MODEL_ID,
+            "tokenizer_id": MODEL_ID,
+            "revision": REVISION,
+            "chat_template": tokenizer.chat_template,
+            "settings": settings,
+            "selection": "largest-remainder quotas; seeded shuffle; uniform prompt choice",
+            "prompt_bank": {"file": bank_path.name, "sha256": digest(bank_path)},
+            "workload": {"file": workload_path.name, "sha256": digest(workload_path)},
+            "class_counts": dict(Counter(a["length_class"] for a in assignments)),
+            "request_prompts": assignments,
+            "round_robin": {
+                "num_prefill_workers": num_prefill_workers,
+                "prompt_tokens_per_source": source_totals,
+                "max_to_min_ratio": max(source_totals) / min(source_totals)
+                if min(source_totals)
+                else None,
+            },
+            "capacity_note": f"Each worker needs at least {kv_capacity_tokens} KV token slots (e.g. {(kv_capacity_tokens + 15) // 16} blocks of 16); this is not a throughput recommendation.",
+        },
+    )
     print(f"Frozen {len(workload.requests)} requests in {output}")
     print(f"Prompt lengths: {[(p.prompt_id, len(p.token_ids)) for p in bank]}")
     print(f"Round-robin prompt tokens: {source_totals}")
@@ -113,10 +169,15 @@ def main():
     args = parser.parse_args()
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("Output directory must be empty; preserve frozen inputs or choose a new path")
-    freeze(args.output, local_files_only=args.local_files_only,
-           num_requests=args.num_requests, rate_rps=args.rate_rps,
-           max_new_tokens=args.max_new_tokens, kv_capacity_tokens=args.kv_capacity_tokens,
-           num_prefill_workers=args.num_prefill_workers)
+    freeze(
+        args.output,
+        local_files_only=args.local_files_only,
+        num_requests=args.num_requests,
+        rate_rps=args.rate_rps,
+        max_new_tokens=args.max_new_tokens,
+        kv_capacity_tokens=args.kv_capacity_tokens,
+        num_prefill_workers=args.num_prefill_workers,
+    )
 
 
 if __name__ == "__main__":

@@ -16,10 +16,19 @@ class Prompt:
 
 
 def generate_mixed_workload(
-    *, arrival_mode, rate_rps: float, num_requests: int,
-    arrival_seed: int, prompt_seed: int, prompt_bank: tuple[Prompt, ...],
-    class_weights: dict[str, float], max_new_tokens: int, eos_token_id: int,
-    vocab_size: int, max_context_tokens: int, kv_capacity_tokens: int,
+    *,
+    arrival_mode,
+    rate_rps: float,
+    num_requests: int,
+    arrival_seed: int,
+    prompt_seed: int,
+    prompt_bank: tuple[Prompt, ...],
+    class_weights: dict[str, float],
+    max_new_tokens: int,
+    eos_token_id: int,
+    vocab_size: int,
+    max_context_tokens: int,
+    kv_capacity_tokens: int,
 ) -> Workload:
     """Use exact class quotas (largest remainder), then shuffle with prompt_seed.
 
@@ -56,7 +65,11 @@ def generate_mixed_workload(
     groups = {name: [] for name in classes}
     seen = set()
     for prompt in prompt_bank:
-        if not isinstance(prompt, Prompt) or not isinstance(prompt.prompt_id, str) or not prompt.prompt_id:
+        if (
+            not isinstance(prompt, Prompt)
+            or not isinstance(prompt.prompt_id, str)
+            or not prompt.prompt_id
+        ):
             raise ValueError("Prompt bank requires Prompt records with nonempty IDs")
         if prompt.prompt_id in seen:
             raise ValueError("Duplicate prompt ID")
@@ -65,10 +78,15 @@ def generate_mixed_workload(
         if not isinstance(prompt.text, str):
             raise ValueError("Prompt text must be a string")
         # Reuse the request generator's validation even for unused bank entries.
-        generate_workload(arrival_mode=arrival_mode, rate_rps=rate_rps,
-                          num_requests=0, seed=arrival_seed,
-                          prompt_token_ids=prompt.token_ids,
-                          max_new_tokens=max_new_tokens, eos_token_id=eos_token_id)
+        generate_workload(
+            arrival_mode=arrival_mode,
+            rate_rps=rate_rps,
+            num_requests=0,
+            seed=arrival_seed,
+            prompt_token_ids=prompt.token_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+        )
         if any(token >= vocab_size for token in prompt.token_ids):
             raise ValueError("Prompt token is outside the model vocabulary")
         if len(prompt.token_ids) + max_new_tokens > max_context_tokens:
@@ -82,14 +100,18 @@ def generate_mixed_workload(
     if eos_token_id != -1 and not 0 <= eos_token_id < vocab_size:
         raise ValueError("EOS must be -1 or a vocabulary token")
     base = generate_workload(
-        arrival_mode=arrival_mode, rate_rps=rate_rps, num_requests=num_requests,
-        seed=arrival_seed, prompt_token_ids=prompt_bank[0].token_ids,
-        max_new_tokens=max_new_tokens, eos_token_id=eos_token_id,
+        arrival_mode=arrival_mode,
+        rate_rps=rate_rps,
+        num_requests=num_requests,
+        seed=arrival_seed,
+        prompt_token_ids=prompt_bank[0].token_ids,
+        max_new_tokens=max_new_tokens,
+        eos_token_id=eos_token_id,
     )
     quotas = [num_requests * (w / sum(weights)) for w in weights]
     counts = [math.floor(q) for q in quotas]
     priority = sorted(range(len(classes)), key=lambda i: (-(quotas[i] - counts[i]), classes[i]))
-    for index in priority[:num_requests - sum(counts)]:
+    for index in priority[: num_requests - sum(counts)]:
         counts[index] += 1
     labels = [c for c, count in zip(classes, counts) for _ in range(count)]
     rng = random.Random(prompt_seed)
